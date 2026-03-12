@@ -1,0 +1,51 @@
+@import url('https://fonts.googleapis.com/css2?family=Anuphan:wght@400;600;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Anuphan", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Anuphan", ui-sans-serif, system-ui, sans-serif;
+  --color-primary: #CAB5DD;
+  --color-primary-dark: #B29ACD;
+  --color-surface: rgba(255, 255, 255, 0.7);
+  --color-border-muted: rgba(0, 0, 0, 0.05);
+}
+
+body {
+  @apply min-h-screen font-sans antialiased;
+  color: #2D2D2D;
+  background-color: #F1E9F6;
+  background-image: url('/image_7ec47a.png');
+  background-repeat: repeat;
+  background-size: 200px;
+  margin: 0;
+  padding: 0;
+}
+
+h1, h2, h3, h4 {
+  @apply font-display;
+}
+
+.header-container {
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(15px);
+  border-bottom: 1.5px solid rgba(150, 120, 182, 0.2);
+  position: sticky;
+  top: 20px;
+  margin: 0 20px;
+  border-radius: 20px;
+  z-index: 1000;
+}
+
+.card {
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(10px);
+  border: 2px solid #FFFFFF;
+  border-radius: 24px;
+  box-shadow: 0 8px 32px rgba(150, 120, 182, 0.15);
+}
+
+h1.welcome-title,
+h2.welcome-title {
+  color: #2D2D2D;
+  text-shadow: 0px 4px 10px rgba(255, 255, 255, 0.8);
+}
