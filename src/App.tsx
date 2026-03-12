@@ -31,7 +31,78 @@ import { GoogleGenAI } from "@google/genai";
 import * as XLSX from 'xlsx';
 import { User, Classroom, Assignment, Announcement, AttendanceRecord, AttendanceStatus, MonthlyAttendanceSummary, LeaderboardSnapshot, ClassroomGame, ClassroomGameQuestion, ActiveGamePayload } from './types';
 
-const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY ?? '' });
+const GEMINI_API_KEY = String(
+  import.meta.env.VITE_GEMINI_API_KEY ??
+  process.env.GEMINI_API_KEY ??
+  ''
+).trim();
+const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
+
+const extractAiResponseText = (response: any): string => {
+  if (!response) return '';
+
+  if (typeof response.text === 'string' && response.text.trim()) {
+    return response.text.trim();
+  }
+
+  if (typeof response.text === 'function') {
+    const result = response.text();
+    if (typeof result === 'string' && result.trim()) {
+      return result.trim();
+    }
+  }
+
+  const parts = response?.candidates?.[0]?.content?.parts;
+  if (Array.isArray(parts)) {
+    const merged = parts
+      .map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
+      .join('\n')
+      .trim();
+    if (merged) return merged;
+  }
+
+  return '';
+};
+
+const normalizeAiJsonText = (raw: string): string => {
+  const withoutFence = raw
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```$/i, '')
+    .trim();
+
+  if (!withoutFence) return withoutFence;
+
+  const objectStart = withoutFence.indexOf('{');
+  const objectEnd = withoutFence.lastIndexOf('}');
+  const arrayStart = withoutFence.indexOf('[');
+  const arrayEnd = withoutFence.lastIndexOf(']');
+
+  if (arrayStart !== -1 && arrayEnd !== -1 && (objectStart === -1 || arrayStart < objectStart)) {
+    return withoutFence.slice(arrayStart, arrayEnd + 1);
+  }
+
+  if (objectStart !== -1 && objectEnd !== -1) {
+    return withoutFence.slice(objectStart, objectEnd + 1);
+  }
+
+  return withoutFence;
+};
+
+const getReadableAiError = (error: unknown): string => {
+  const message = String((error as any)?.message || (error as any)?.toString?.() || '');
+  const lowered = message.toLowerCase();
+
+  if (lowered.includes('api key') || lowered.includes('unauthorized') || lowered.includes('permission')) {
+    return 'AI ใช้งานไม่ได้: ตรวจสอบ VITE_GEMINI_API_KEY และสิทธิ์การใช้งานโมเดล';
+  }
+
+  if (lowered.includes('quota') || lowered.includes('rate') || lowered.includes('429')) {
+    return 'AI ใช้งานเกินโควตาหรือถี่เกินไป ลองใหม่อีกครั้งในภายหลัง';
+  }
+
+  return 'ไม่สามารถสร้างคำถามด้วย AI ได้';
+};
 
 const CLASS_COLOR_THEMES = [
   {
@@ -1083,6 +1154,11 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [isCreateGameOpen, setIsCreateGameOpen] = useState(false);
   const [isCreatingGame, setIsCreatingGame] = useState(false);
+  const [editingGameId, setEditingGameId] = useState<number | null>(null);
+  const [editingQuestionIndex, setEditingQuestionIndex] = useState<number | null>(null);
+  const [deletingGameId, setDeletingGameId] = useState<number | null>(null);
+  const [isLoadingGameDetail, setIsLoadingGameDetail] = useState(false);
+  const [isGeneratingGameQuestions, setIsGeneratingGameQuestions] = useState(false);
   const [gameForm, setGameForm] = useState({ title: '', description: '', total_questions: '10', time_limit_sec: '20' });
   const [gameQuestionsDraft, setGameQuestionsDraft] = useState<Array<{
     questionText: string;
@@ -1321,6 +1397,8 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
       return;
     }
 
+    const isEditing = editingGameId !== null;
+
     if (gameQuestionsDraft.length === 0) {
       showToast('error', 'กรุณาเพิ่มคำถามอย่างน้อย 1 ข้อ');
       return;
@@ -1328,35 +1406,47 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
 
     setIsCreatingGame(true);
     try {
-      const res = await fetch(`/api/classes/${classroom.id}/games`, {
-        method: 'POST',
+      const res = await fetch(
+        isEditing
+          ? `/api/classes/${classroom.id}/games/${editingGameId}`
+          : `/api/classes/${classroom.id}/games`,
+        {
+        method: isEditing ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           actorId: currentUser.id,
           title,
           description,
-          totalQuestions,
+          totalQuestions: gameQuestionsDraft.length || totalQuestions,
           timeLimitSec,
           questions: gameQuestionsDraft
         })
-      });
+      }
+      );
 
       if (!res.ok) {
-        const errorMessage = await getBackendErrorMessage(res, 'ไม่สามารถสร้างเกมได้');
+        const errorMessage = await getBackendErrorMessage(res, isEditing ? 'ไม่สามารถแก้ไขเกมได้' : 'ไม่สามารถสร้างเกมได้');
         showToast('error', errorMessage);
         return;
       }
 
       const game = (await res.json()) as ClassroomGame;
-      setGames((prev) => [game, ...prev]);
+      if (isEditing) {
+        setGames((prev) => prev.map((item) => (item.id === game.id ? game : item)));
+      } else {
+        setGames((prev) => [game, ...prev]);
+      }
+
       setGameForm({ title: '', description: '', total_questions: '10', time_limit_sec: '20' });
       setGameQuestionsDraft([]);
       setQuestionDraft({ questionText: '', choiceA: '', choiceB: '', choiceC: '', choiceD: '', correctChoice: 'A' });
+      setEditingQuestionIndex(null);
       setIsCreateGameOpen(false);
-      showToast('success', 'สร้างเกมสำเร็จแล้ว');
+      setEditingGameId(null);
+      showToast('success', isEditing ? 'แก้ไขเกมสำเร็จแล้ว' : 'สร้างเกมสำเร็จแล้ว');
     } catch (error) {
-      console.error('Failed to create game', error);
-      showToast('error', 'เกิดข้อผิดพลาดระหว่างสร้างเกม');
+      console.error('Failed to save game', error);
+      showToast('error', isEditing ? 'เกิดข้อผิดพลาดระหว่างแก้ไขเกม' : 'เกิดข้อผิดพลาดระหว่างสร้างเกม');
     } finally {
       setIsCreatingGame(false);
     }
@@ -1445,6 +1535,105 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
     }
   };
 
+  const startEditGame = async (game: ClassroomGame) => {
+    if (currentUser.role !== 'teacher') return;
+
+    setIsLoadingGameDetail(true);
+    setEditingGameId(game.id);
+    setGameForm({
+      title: game.title || '',
+      description: game.description || '',
+      total_questions: String(game.total_questions || 10),
+      time_limit_sec: String(game.time_limit_sec || 20)
+    });
+    setGameQuestionsDraft([]);
+    setQuestionDraft({ questionText: '', choiceA: '', choiceB: '', choiceC: '', choiceD: '', correctChoice: 'A' });
+    setEditingQuestionIndex(null);
+    setIsCreateGameOpen(true);
+
+    try {
+      const res = await fetch(`/api/classes/${classroom.id}/games/${game.id}?actorId=${currentUser.id}`);
+      if (!res.ok) {
+        const message = await getBackendErrorMessage(res, 'ไม่สามารถโหลดคำถามเกมเดิมได้');
+        showToast('error', message);
+        return;
+      }
+
+      const detail = await res.json() as {
+        game?: ClassroomGame;
+        questions?: Array<{
+          question_text?: string;
+          choice_a?: string;
+          choice_b?: string;
+          choice_c?: string;
+          choice_d?: string;
+          correct_choice?: string;
+        }>;
+      };
+
+      const mappedQuestions = (detail.questions || [])
+        .map((item) => ({
+          questionText: String(item.question_text || '').trim(),
+          choiceA: String(item.choice_a || '').trim(),
+          choiceB: String(item.choice_b || '').trim(),
+          choiceC: String(item.choice_c || '').trim(),
+          choiceD: String(item.choice_d || '').trim(),
+          correctChoice: String(item.correct_choice || 'A').toUpperCase() as 'A' | 'B' | 'C' | 'D'
+        }))
+        .filter((item) => item.questionText && item.choiceA && item.choiceB && item.choiceC && item.choiceD && ['A', 'B', 'C', 'D'].includes(item.correctChoice));
+
+      setGameQuestionsDraft(mappedQuestions);
+      if (mappedQuestions.length > 0) {
+        setGameForm((prev) => ({ ...prev, total_questions: String(mappedQuestions.length) }));
+      }
+    } catch (error) {
+      console.error('Failed to load game detail', error);
+      showToast('error', 'เกิดข้อผิดพลาดระหว่างโหลดคำถามเกมเดิม');
+    } finally {
+      setIsLoadingGameDetail(false);
+    }
+  };
+
+  const cancelGameForm = () => {
+    setIsCreateGameOpen(false);
+    setEditingGameId(null);
+    setGameForm({ title: '', description: '', total_questions: '10', time_limit_sec: '20' });
+    setGameQuestionsDraft([]);
+    setQuestionDraft({ questionText: '', choiceA: '', choiceB: '', choiceC: '', choiceD: '', correctChoice: 'A' });
+    setEditingQuestionIndex(null);
+  };
+
+  const deleteGame = async (game: ClassroomGame) => {
+    if (currentUser.role !== 'teacher') return;
+
+    const confirmed = window.confirm(`ต้องการลบเกม "${game.title}" ใช่ไหม?`);
+    if (!confirmed) return;
+
+    setDeletingGameId(game.id);
+    try {
+      const res = await fetch(`/api/classes/${classroom.id}/games/${game.id}?actorId=${currentUser.id}`, {
+        method: 'DELETE'
+      });
+
+      if (!res.ok) {
+        const message = await getBackendErrorMessage(res, 'ไม่สามารถลบเกมได้');
+        showToast('error', message);
+        return;
+      }
+
+      setGames((prev) => prev.filter((item) => item.id !== game.id));
+      if (editingGameId === game.id) {
+        cancelGameForm();
+      }
+      showToast('success', 'ลบเกมสำเร็จแล้ว');
+    } catch (error) {
+      console.error('Failed to delete game', error);
+      showToast('error', 'เกิดข้อผิดพลาดระหว่างลบเกม');
+    } finally {
+      setDeletingGameId(null);
+    }
+  };
+
   const addQuestionDraft = () => {
     const normalizedQuestion = questionDraft.questionText.trim();
     const normalizedA = questionDraft.choiceA.trim();
@@ -1457,22 +1646,145 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
       return;
     }
 
-    setGameQuestionsDraft((prev) => [
-      ...prev,
-      {
+    setGameQuestionsDraft((prev) => {
+      const nextItem = {
         questionText: normalizedQuestion,
         choiceA: normalizedA,
         choiceB: normalizedB,
         choiceC: normalizedC,
         choiceD: normalizedD,
         correctChoice: questionDraft.correctChoice
+      };
+
+      if (editingQuestionIndex === null) {
+        return [...prev, nextItem];
       }
-    ]);
+
+      return prev.map((item, idx) => (idx === editingQuestionIndex ? nextItem : item));
+    });
     setQuestionDraft({ questionText: '', choiceA: '', choiceB: '', choiceC: '', choiceD: '', correctChoice: 'A' });
+    setEditingQuestionIndex(null);
+  };
+
+  const startEditQuestionDraft = (index: number) => {
+    const item = gameQuestionsDraft[index];
+    if (!item) return;
+
+    setEditingQuestionIndex(index);
+    setQuestionDraft({
+      questionText: item.questionText,
+      choiceA: item.choiceA,
+      choiceB: item.choiceB,
+      choiceC: item.choiceC,
+      choiceD: item.choiceD,
+      correctChoice: item.correctChoice
+    });
+  };
+
+  const cancelEditQuestionDraft = () => {
+    setEditingQuestionIndex(null);
+    setQuestionDraft({ questionText: '', choiceA: '', choiceB: '', choiceC: '', choiceD: '', correctChoice: 'A' });
+  };
+
+  const generateGameQuestionsWithAi = async () => {
+    if (currentUser.role !== 'teacher') {
+      showToast('error', 'เฉพาะครูเท่านั้นที่ใช้ AI สร้างคำถามได้');
+      return;
+    }
+
+    if (!ai) {
+      showToast('error', 'ยังไม่ได้ตั้งค่า VITE_GEMINI_API_KEY สำหรับการสร้างคำถามด้วย AI');
+      return;
+    }
+
+    const title = gameForm.title.trim();
+    const description = gameForm.description.trim();
+    const topic = description || title || classroom.name;
+    const targetCount = Math.max(1, Math.min(20, Number(gameForm.total_questions || 5)));
+    const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-3-flash-preview'];
+
+    setIsGeneratingGameQuestions(true);
+    try {
+      let parsed: any = null;
+      let lastError: unknown = null;
+
+      for (const modelName of models) {
+        try {
+          const response = await ai.models.generateContent({
+            model: modelName,
+            contents: `ช่วยสร้างคำถามเกมแบบปรนัย 4 ตัวเลือก สำหรับชั้นเรียน "${classroom.name}" หัวข้อ "${topic}" จำนวน ${targetCount} ข้อ\nส่งคืนเฉพาะ JSON รูปแบบ {"questions":[{"questionText":"...","choiceA":"...","choiceB":"...","choiceC":"...","choiceD":"...","correctChoice":"A"}]}`,
+            config: { responseMimeType: 'application/json' }
+          });
+
+          const rawText = extractAiResponseText(response);
+          const cleanedText = normalizeAiJsonText(rawText);
+          parsed = JSON.parse(cleanedText);
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      if (!parsed) {
+        throw lastError || new Error('No AI response payload');
+      }
+
+      const sourceQuestions = Array.isArray(parsed) ? parsed : parsed?.questions;
+
+      if (!Array.isArray(sourceQuestions)) {
+        showToast('error', 'AI ส่งรูปแบบคำถามไม่ถูกต้อง');
+        return;
+      }
+
+      const normalized = sourceQuestions
+        .map((item: any) => ({
+          questionText: String(item?.questionText || '').trim(),
+          choiceA: String(item?.choiceA || '').trim(),
+          choiceB: String(item?.choiceB || '').trim(),
+          choiceC: String(item?.choiceC || '').trim(),
+          choiceD: String(item?.choiceD || '').trim(),
+          correctChoice: String(item?.correctChoice || '').trim().toUpperCase() as 'A' | 'B' | 'C' | 'D'
+        }))
+        .filter((item: any) => (
+          item.questionText &&
+          item.choiceA &&
+          item.choiceB &&
+          item.choiceC &&
+          item.choiceD &&
+          ['A', 'B', 'C', 'D'].includes(item.correctChoice)
+        ));
+
+      if (normalized.length === 0) {
+        showToast('error', 'AI ไม่ได้สร้างคำถามที่ใช้งานได้ ลองกดใหม่อีกครั้ง');
+        return;
+      }
+
+      setGameQuestionsDraft(normalized);
+      showToast('success', `AI แทนที่คำถามเดิมด้วยชุดใหม่ ${normalized.length} ข้อแล้ว`);
+    } catch (error) {
+      console.error('AI game question generation failed', error);
+      showToast('error', getReadableAiError(error));
+    } finally {
+      setIsGeneratingGameQuestions(false);
+    }
   };
 
   const removeQuestionDraft = (index: number) => {
     setGameQuestionsDraft((prev) => prev.filter((_, idx) => idx !== index));
+    setEditingQuestionIndex((prev) => {
+      if (prev === null) return null;
+      if (prev === index) return null;
+      if (prev > index) return prev - 1;
+      return prev;
+    });
+  };
+
+  const clearAllQuestionDrafts = () => {
+    if (gameQuestionsDraft.length === 0) return;
+    setGameQuestionsDraft([]);
+    setEditingQuestionIndex(null);
+    setQuestionDraft({ questionText: '', choiceA: '', choiceB: '', choiceC: '', choiceD: '', correctChoice: 'A' });
+    showToast('success', 'ลบคำถามทั้งหมดแล้ว');
   };
 
   const submitGameAnswer = async () => {
@@ -1918,17 +2230,39 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
   };
 
   const generateAssignmentWithAi = async () => {
+    if (!ai) {
+      showToast('error', 'ยังไม่ได้ตั้งค่า VITE_GEMINI_API_KEY สำหรับผู้ช่วย AI');
+      return;
+    }
+
+    const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-3-flash-preview'];
     setIsAiGenerating(true);
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `สร้างงานที่สร้างสรรค์สำหรับชั้นเรียนชื่อ "${classroom.name}". 
-        คำอธิบายชั้นเรียนคือ: "${classroom.description}".
-        ส่งคืนผลลัพธ์เป็นวัตถุ JSON ที่มีฟิลด์ "title" และ "description" เป็นภาษาไทย`,
-        config: { responseMimeType: "application/json" }
-      });
-      
-      const data = JSON.parse(response.text);
+      let data: any = null;
+      let lastError: unknown = null;
+
+      for (const modelName of models) {
+        try {
+          const response = await ai.models.generateContent({
+            model: modelName,
+            contents: `สร้างงานที่สร้างสรรค์สำหรับชั้นเรียนชื่อ "${classroom.name}". 
+            คำอธิบายชั้นเรียนคือ: "${classroom.description}".
+            ส่งคืนผลลัพธ์เป็นวัตถุ JSON ที่มีฟิลด์ "title" และ "description" เป็นภาษาไทย`,
+            config: { responseMimeType: "application/json" }
+          });
+
+          const rawText = extractAiResponseText(response);
+          const cleanedText = normalizeAiJsonText(rawText);
+          data = JSON.parse(cleanedText);
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      if (!data?.title || !data?.description) {
+        throw lastError || new Error('Invalid AI assignment payload');
+      }
       
       await fetch('/api/assignments', {
         method: 'POST',
@@ -1942,8 +2276,10 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
       });
       
       fetchClassData();
+      showToast('success', 'AI สร้างงานใหม่เรียบร้อยแล้ว');
     } catch (error) {
       console.error("AI Generation failed", error);
+      showToast('error', getReadableAiError(error));
     } finally {
       setIsAiGenerating(false);
     }
@@ -2461,18 +2797,25 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
               </div>
               {currentUser.role === 'teacher' && classworkMenu === 'game' && (
                 <button
-                  onClick={() => setIsCreateGameOpen((prev) => !prev)}
+                  onClick={() => {
+                    if (isCreateGameOpen) {
+                      cancelGameForm();
+                      return;
+                    }
+                    setEditingGameId(null);
+                    setIsCreateGameOpen(true);
+                  }}
                   className="flex items-center gap-2 bg-pink-600 text-white px-5 py-2 rounded-xl font-semibold hover:bg-pink-500 transition-all shadow-md shadow-pink-100"
                 >
                   <Plus className="w-5 h-5" />
-                  {isCreateGameOpen ? 'ปิดฟอร์มเกม' : 'สร้างเกม'}
+                  {isCreateGameOpen ? (editingGameId ? 'ยกเลิกแก้ไขเกม' : 'ปิดฟอร์มเกม') : 'สร้างเกม'}
                 </button>
               )}
             </div>
 
             {currentUser.role === 'teacher' && classworkMenu === 'game' && isCreateGameOpen && (
               <div className="bg-white/40 backdrop-blur-md rounded-2xl border border-slate-200/50 p-6 shadow-sm">
-                <h4 className="text-lg font-bold text-slate-900 mb-4">สร้างเกมใหม่ในวิชานี้</h4>
+                <h4 className="text-lg font-bold text-slate-900 mb-4">{editingGameId ? 'แก้ไขเกม' : 'สร้างเกมใหม่ในวิชานี้'}</h4>
                 <form onSubmit={createGame} className="space-y-3">
                   <input
                     value={gameForm.title}
@@ -2509,47 +2852,106 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
                   </div>
 
                   <div className="rounded-xl border border-slate-200 bg-white/70 p-3 space-y-3">
-                    <p className="text-sm font-bold text-slate-800">เพิ่มคำถามเกม</p>
-                    <textarea
-                      value={questionDraft.questionText}
-                      onChange={(e) => setQuestionDraft((prev) => ({ ...prev, questionText: e.target.value }))}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-200"
-                      placeholder="คำถาม"
-                    />
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                      <input value={questionDraft.choiceA} onChange={(e) => setQuestionDraft((prev) => ({ ...prev, choiceA: e.target.value }))} className="px-3 py-2 rounded-lg border border-slate-200" placeholder="ตัวเลือก A" />
-                      <input value={questionDraft.choiceB} onChange={(e) => setQuestionDraft((prev) => ({ ...prev, choiceB: e.target.value }))} className="px-3 py-2 rounded-lg border border-slate-200" placeholder="ตัวเลือก B" />
-                      <input value={questionDraft.choiceC} onChange={(e) => setQuestionDraft((prev) => ({ ...prev, choiceC: e.target.value }))} className="px-3 py-2 rounded-lg border border-slate-200" placeholder="ตัวเลือก C" />
-                      <input value={questionDraft.choiceD} onChange={(e) => setQuestionDraft((prev) => ({ ...prev, choiceD: e.target.value }))} className="px-3 py-2 rounded-lg border border-slate-200" placeholder="ตัวเลือก D" />
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <select
-                        value={questionDraft.correctChoice}
-                        onChange={(e) => setQuestionDraft((prev) => ({ ...prev, correctChoice: e.target.value as 'A' | 'B' | 'C' | 'D' }))}
-                        className="px-3 py-2 rounded-lg border border-slate-200"
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-bold text-slate-800">{editingGameId ? 'แก้ไขคำถามเกม' : 'เพิ่มคำถามเกม'}</p>
+                      <button
+                        type="button"
+                        onClick={generateGameQuestionsWithAi}
+                        disabled={isGeneratingGameQuestions || isLoadingGameDetail}
+                        className="inline-flex items-center gap-1 rounded-lg bg-violet-600 px-3 py-2 text-xs font-bold text-white hover:bg-violet-500 disabled:opacity-60"
                       >
-                        <option value="A">คำตอบที่ถูก: A</option>
-                        <option value="B">คำตอบที่ถูก: B</option>
-                        <option value="C">คำตอบที่ถูก: C</option>
-                        <option value="D">คำตอบที่ถูก: D</option>
-                      </select>
-                      <button type="button" onClick={addQuestionDraft} className="rounded-lg bg-slate-700 px-3 py-2 text-sm font-bold text-white hover:bg-slate-600">
-                        เพิ่มคำถาม
+                        <Sparkles className="w-3.5 h-3.5" />
+                        {isGeneratingGameQuestions ? 'AI กำลังสร้าง...' : 'แทนที่คำถามด้วย AI'}
                       </button>
                     </div>
 
-                    {gameQuestionsDraft.length > 0 && (
-                      <div className="space-y-2">
-                        {gameQuestionsDraft.map((item, idx) => (
-                          <div key={`${item.questionText}-${idx}`} className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2">
-                            <div className="min-w-0">
-                              <p className="text-sm font-semibold text-slate-800 truncate">ข้อ {idx + 1}: {item.questionText}</p>
-                              <p className="text-xs text-slate-500">เฉลย: {item.correctChoice}</p>
-                            </div>
-                            <button type="button" onClick={() => removeQuestionDraft(idx)} className="text-xs font-bold text-rose-600 hover:text-rose-500">ลบ</button>
-                          </div>
-                        ))}
+                    {isLoadingGameDetail ? (
+                      <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">
+                        กำลังโหลดคำถามเดิมของเกม...
                       </div>
+                    ) : (
+                      <>
+                        <textarea
+                          value={questionDraft.questionText}
+                          onChange={(e) => setQuestionDraft((prev) => ({ ...prev, questionText: e.target.value }))}
+                          className="w-full px-3 py-2 rounded-lg border border-slate-200"
+                          placeholder="คำถาม"
+                        />
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                          <input value={questionDraft.choiceA} onChange={(e) => setQuestionDraft((prev) => ({ ...prev, choiceA: e.target.value }))} className="px-3 py-2 rounded-lg border border-slate-200" placeholder="ตัวเลือก A" />
+                          <input value={questionDraft.choiceB} onChange={(e) => setQuestionDraft((prev) => ({ ...prev, choiceB: e.target.value }))} className="px-3 py-2 rounded-lg border border-slate-200" placeholder="ตัวเลือก B" />
+                          <input value={questionDraft.choiceC} onChange={(e) => setQuestionDraft((prev) => ({ ...prev, choiceC: e.target.value }))} className="px-3 py-2 rounded-lg border border-slate-200" placeholder="ตัวเลือก C" />
+                          <input value={questionDraft.choiceD} onChange={(e) => setQuestionDraft((prev) => ({ ...prev, choiceD: e.target.value }))} className="px-3 py-2 rounded-lg border border-slate-200" placeholder="ตัวเลือก D" />
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <select
+                            value={questionDraft.correctChoice}
+                            onChange={(e) => setQuestionDraft((prev) => ({ ...prev, correctChoice: e.target.value as 'A' | 'B' | 'C' | 'D' }))}
+                            className="px-3 py-2 rounded-lg border border-slate-200"
+                          >
+                            <option value="A">คำตอบที่ถูก: A</option>
+                            <option value="B">คำตอบที่ถูก: B</option>
+                            <option value="C">คำตอบที่ถูก: C</option>
+                            <option value="D">คำตอบที่ถูก: D</option>
+                          </select>
+                          <div className="flex items-center gap-2">
+                            {editingQuestionIndex !== null && (
+                              <button
+                                type="button"
+                                onClick={cancelEditQuestionDraft}
+                                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50"
+                              >
+                                ยกเลิกแก้ไขข้อ
+                              </button>
+                            )}
+                            <button type="button" onClick={addQuestionDraft} className="rounded-lg bg-slate-700 px-3 py-2 text-sm font-bold text-white hover:bg-slate-600">
+                              {editingQuestionIndex !== null ? 'บันทึกข้อที่แก้ไข' : 'เพิ่มคำถาม'}
+                            </button>
+                          </div>
+                        </div>
+
+                        {gameQuestionsDraft.length > 0 && (
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <p className="text-xs font-bold text-slate-500">คำถามที่ตั้งไว้ {gameQuestionsDraft.length} ข้อ</p>
+                              <button
+                                type="button"
+                                onClick={clearAllQuestionDrafts}
+                                className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-bold text-rose-700 hover:bg-rose-100"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                ลบทั้งหมด
+                              </button>
+                            </div>
+                            {gameQuestionsDraft.map((item, idx) => (
+                              <div key={`${item.questionText}-${idx}`} className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                <div className="min-w-0">
+                                  <p className="text-sm font-semibold text-slate-800 truncate">ข้อ {idx + 1}: {item.questionText}</p>
+                                  <p className="text-xs text-slate-500">เฉลย: {item.correctChoice}</p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => startEditQuestionDraft(idx)}
+                                    className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-700 hover:bg-blue-100"
+                                  >
+                                    แก้ไข
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => removeQuestionDraft(idx)}
+                                    className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-bold text-rose-700 hover:bg-rose-100"
+                                    aria-label={`ลบคำถามข้อ ${idx + 1}`}
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    ลบคำถาม
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
 
@@ -2558,7 +2960,7 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
                     disabled={isCreatingGame}
                     className="bg-pink-600 text-white px-5 py-2 rounded-xl font-semibold hover:bg-pink-500 transition-all shadow-md shadow-pink-100 disabled:opacity-60"
                   >
-                    {isCreatingGame ? 'กำลังสร้างเกม...' : 'บันทึกเกม'}
+                    {isCreatingGame ? (editingGameId ? 'กำลังบันทึกการแก้ไข...' : 'กำลังสร้างเกม...') : (editingGameId ? 'บันทึกการแก้ไข' : 'บันทึกเกม')}
                   </button>
                 </form>
               </div>
@@ -2580,12 +2982,27 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
                         </div>
                         <div className="flex items-center gap-2">
                           {currentUser.role === 'teacher' && (
-                            <button
-                              onClick={() => toggleGameActive(game, !game.is_active)}
-                              className={`text-[11px] rounded-full px-3 py-1 font-bold ${game.is_active ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}
-                            >
-                              {game.is_active ? 'ปิดเกม' : 'เปิดเกม'}
-                            </button>
+                            <>
+                              <button
+                                onClick={() => startEditGame(game)}
+                                className="text-[11px] rounded-full px-3 py-1 font-bold bg-blue-100 text-blue-700"
+                              >
+                                แก้ไข
+                              </button>
+                              <button
+                                onClick={() => deleteGame(game)}
+                                disabled={deletingGameId === game.id}
+                                className="text-[11px] rounded-full px-3 py-1 font-bold bg-rose-100 text-rose-700 disabled:opacity-60"
+                              >
+                                {deletingGameId === game.id ? 'กำลังลบ...' : 'ลบ'}
+                              </button>
+                              <button
+                                onClick={() => toggleGameActive(game, !game.is_active)}
+                                className={`text-[11px] rounded-full px-3 py-1 font-bold ${game.is_active ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}
+                              >
+                                {game.is_active ? 'ปิดเกม' : 'เปิดเกม'}
+                              </button>
+                            </>
                           )}
                           <span className={`text-[11px] rounded-full px-2.5 py-1 font-bold ${game.is_active ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
                             {game.is_active ? 'กำลังเล่น' : 'ยังไม่เริ่ม'}

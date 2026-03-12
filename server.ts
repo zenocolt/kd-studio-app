@@ -1863,6 +1863,299 @@ async function startServer() {
     }
   });
 
+  app.get("/api/classes/:classId/games/:gameId", async (req, res) => {
+    const classId = Number(req.params.classId);
+    const gameId = Number(req.params.gameId);
+    const actorId = Number(req.query.actorId || 0);
+
+    if (!Number.isFinite(classId) || !Number.isFinite(gameId) || !Number.isFinite(actorId)) {
+      return res.status(400).json({ error: "Invalid class id, game id or actor id" });
+    }
+
+    if (!(await isClassOwnerTeacher(classId, actorId))) {
+      return res.status(403).json({ error: "เฉพาะครูเจ้าของวิชาเท่านั้นที่ดูรายละเอียดเกมได้" });
+    }
+
+    if (dbProvider === "supabase") {
+      if (!supabase) return res.status(500).json({ error: "Supabase is not configured" });
+
+      const gameResult = await supabase
+        .from("class_games")
+        .select("*")
+        .eq("id", gameId)
+        .eq("class_id", classId)
+        .maybeSingle();
+
+      if (gameResult.error) {
+        return res.status(500).json({ error: "ไม่สามารถโหลดรายละเอียดเกมได้" });
+      }
+      if (!gameResult.data) {
+        return res.status(404).json({ error: "ไม่พบเกมในวิชานี้" });
+      }
+
+      const questionsResult = await supabase
+        .from("class_game_questions")
+        .select("id, class_id, game_id, question_text, choice_a, choice_b, choice_c, choice_d, correct_choice, display_order")
+        .eq("class_id", classId)
+        .eq("game_id", gameId)
+        .order("display_order", { ascending: true });
+
+      if (questionsResult.error) {
+        return res.status(500).json({ error: "ไม่สามารถโหลดคำถามเกมได้" });
+      }
+
+      return res.json({ game: gameResult.data, questions: questionsResult.data || [] });
+    }
+
+    const game = db.prepare("SELECT * FROM class_games WHERE id = ? AND class_id = ?").get(gameId, classId);
+    if (!game) {
+      return res.status(404).json({ error: "ไม่พบเกมในวิชานี้" });
+    }
+
+    const questions = db.prepare(`
+      SELECT id, class_id, game_id, question_text, choice_a, choice_b, choice_c, choice_d, correct_choice, display_order
+      FROM class_game_questions
+      WHERE class_id = ? AND game_id = ?
+      ORDER BY display_order ASC
+    `).all(classId, gameId);
+
+    return res.json({ game, questions });
+  });
+
+  app.patch("/api/classes/:classId/games/:gameId", async (req, res) => {
+    const classId = Number(req.params.classId);
+    const gameId = Number(req.params.gameId);
+    const { actorId, title, description, totalQuestions, timeLimitSec, questions } = req.body as {
+      actorId?: number;
+      title?: string;
+      description?: string;
+      totalQuestions?: number;
+      timeLimitSec?: number;
+      questions?: Array<{
+        questionText?: string;
+        choiceA?: string;
+        choiceB?: string;
+        choiceC?: string;
+        choiceD?: string;
+        correctChoice?: string;
+      }>;
+    };
+
+    const teacherId = Number(actorId);
+    if (!Number.isFinite(classId) || !Number.isFinite(gameId) || !Number.isFinite(teacherId)) {
+      return res.status(400).json({ error: "Invalid class id, game id or actor id" });
+    }
+
+    if (!(await isClassOwnerTeacher(classId, teacherId))) {
+      return res.status(403).json({ error: "เฉพาะครูเจ้าของวิชาเท่านั้นที่แก้ไขเกมได้" });
+    }
+
+    const normalizedTitle = String(title || "").trim();
+    const normalizedDescription = String(description || "").trim();
+    const normalizedTotalQuestions = Math.max(1, Math.min(100, Number(totalQuestions || 10)));
+    const normalizedTimeLimit = Math.max(5, Math.min(300, Number(timeLimitSec || 20)));
+
+    if (!normalizedTitle) {
+      return res.status(400).json({ error: "กรุณาระบุชื่อเกม" });
+    }
+
+    const normalizedQuestions = (Array.isArray(questions) ? questions : [])
+      .map((item, index) => {
+        const questionText = String(item.questionText || "").trim();
+        const choiceA = String(item.choiceA || "").trim();
+        const choiceB = String(item.choiceB || "").trim();
+        const choiceC = String(item.choiceC || "").trim();
+        const choiceD = String(item.choiceD || "").trim();
+        const correctChoice = String(item.correctChoice || "A").trim().toUpperCase();
+        return {
+          class_id: classId,
+          question_text: questionText,
+          choice_a: choiceA,
+          choice_b: choiceB,
+          choice_c: choiceC,
+          choice_d: choiceD,
+          correct_choice: ["A", "B", "C", "D"].includes(correctChoice) ? correctChoice : "A",
+          display_order: index + 1
+        };
+      })
+      .filter((item) => item.question_text && item.choice_a && item.choice_b && item.choice_c && item.choice_d);
+
+    const hasQuestionPayload = Array.isArray(questions);
+    if (hasQuestionPayload && normalizedQuestions.length === 0) {
+      return res.status(400).json({ error: "กรุณาระบุคำถามอย่างน้อย 1 ข้อ" });
+    }
+
+    const normalizedQuestionCount = hasQuestionPayload
+      ? normalizedQuestions.length
+      : normalizedTotalQuestions;
+
+    if (dbProvider === "supabase") {
+      if (!supabase) return res.status(500).json({ error: "Supabase is not configured" });
+
+      const gameResult = await supabase
+        .from("class_games")
+        .select("id")
+        .eq("id", gameId)
+        .eq("class_id", classId)
+        .maybeSingle();
+
+      if (gameResult.error) {
+        return res.status(500).json({ error: "ไม่สามารถแก้ไขเกมได้" });
+      }
+      if (!gameResult.data) {
+        return res.status(404).json({ error: "ไม่พบเกมในวิชานี้" });
+      }
+
+      const updated = await supabase
+        .from("class_games")
+        .update({
+          title: normalizedTitle,
+          description: normalizedDescription || null,
+          total_questions: normalizedQuestionCount,
+          time_limit_sec: normalizedTimeLimit
+        })
+        .eq("id", gameId)
+        .eq("class_id", classId)
+        .select("*")
+        .single();
+
+      if (updated.error || !updated.data) {
+        return res.status(500).json({ error: "ไม่สามารถแก้ไขเกมได้" });
+      }
+
+      if (hasQuestionPayload) {
+        const deleteQuestions = await supabase
+          .from("class_game_questions")
+          .delete()
+          .eq("class_id", classId)
+          .eq("game_id", gameId);
+
+        if (deleteQuestions.error) {
+          return res.status(500).json({ error: "ไม่สามารถลบคำถามเดิมของเกมได้" });
+        }
+
+        const insertPayload = normalizedQuestions.map((item) => ({ ...item, game_id: gameId }));
+        const insertQuestions = await supabase
+          .from("class_game_questions")
+          .insert(insertPayload);
+
+        if (insertQuestions.error) {
+          return res.status(500).json({ error: "ไม่สามารถบันทึกคำถามเกมที่แก้ไขได้" });
+        }
+      }
+
+      return res.json(updated.data);
+    }
+
+    const game = db.prepare("SELECT id FROM class_games WHERE id = ? AND class_id = ?").get(gameId, classId);
+    if (!game) {
+      return res.status(404).json({ error: "ไม่พบเกมในวิชานี้" });
+    }
+
+    db.prepare(`
+      UPDATE class_games
+      SET title = ?, description = ?, total_questions = ?, time_limit_sec = ?
+      WHERE id = ? AND class_id = ?
+    `).run(normalizedTitle, normalizedDescription || null, normalizedQuestionCount, normalizedTimeLimit, gameId, classId);
+
+    if (hasQuestionPayload) {
+      db.prepare("DELETE FROM class_game_questions WHERE class_id = ? AND game_id = ?").run(classId, gameId);
+      const insertQuestion = db.prepare(`
+        INSERT INTO class_game_questions (
+          class_id,
+          game_id,
+          question_text,
+          choice_a,
+          choice_b,
+          choice_c,
+          choice_d,
+          correct_choice,
+          display_order
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      normalizedQuestions.forEach((item) => {
+        insertQuestion.run(
+          item.class_id,
+          gameId,
+          item.question_text,
+          item.choice_a,
+          item.choice_b,
+          item.choice_c,
+          item.choice_d,
+          item.correct_choice,
+          item.display_order
+        );
+      });
+    }
+
+    const updated = db.prepare("SELECT * FROM class_games WHERE id = ?").get(gameId);
+    return res.json(updated);
+  });
+
+  app.delete("/api/classes/:classId/games/:gameId", async (req, res) => {
+    const classId = Number(req.params.classId);
+    const gameId = Number(req.params.gameId);
+    const actorId = Number(req.query.actorId || 0);
+
+    if (!Number.isFinite(classId) || !Number.isFinite(gameId) || !Number.isFinite(actorId)) {
+      return res.status(400).json({ error: "Invalid class id, game id or actor id" });
+    }
+
+    if (!(await isClassOwnerTeacher(classId, actorId))) {
+      return res.status(403).json({ error: "เฉพาะครูเจ้าของวิชาเท่านั้นที่ลบเกมได้" });
+    }
+
+    if (dbProvider === "supabase") {
+      if (!supabase) return res.status(500).json({ error: "Supabase is not configured" });
+
+      const gameResult = await supabase
+        .from("class_games")
+        .select("id")
+        .eq("id", gameId)
+        .eq("class_id", classId)
+        .maybeSingle();
+
+      if (gameResult.error) {
+        return res.status(500).json({ error: "ไม่สามารถลบเกมได้" });
+      }
+      if (!gameResult.data) {
+        return res.status(404).json({ error: "ไม่พบเกมในวิชานี้" });
+      }
+
+      const deleteQuestions = await supabase
+        .from("class_game_questions")
+        .delete()
+        .eq("class_id", classId)
+        .eq("game_id", gameId);
+
+      if (deleteQuestions.error) {
+        return res.status(500).json({ error: "ไม่สามารถลบคำถามของเกมได้" });
+      }
+
+      const deleteGame = await supabase
+        .from("class_games")
+        .delete()
+        .eq("id", gameId)
+        .eq("class_id", classId);
+
+      if (deleteGame.error) {
+        return res.status(500).json({ error: "ไม่สามารถลบเกมได้" });
+      }
+
+      return res.json({ success: true });
+    }
+
+    const game = db.prepare("SELECT id FROM class_games WHERE id = ? AND class_id = ?").get(gameId, classId);
+    if (!game) {
+      return res.status(404).json({ error: "ไม่พบเกมในวิชานี้" });
+    }
+
+    db.prepare("DELETE FROM class_game_questions WHERE class_id = ? AND game_id = ?").run(classId, gameId);
+    db.prepare("DELETE FROM class_games WHERE id = ? AND class_id = ?").run(gameId, classId);
+    return res.json({ success: true });
+  });
+
   app.patch("/api/classes/:classId/games/:gameId/active", async (req, res) => {
     const classId = Number(req.params.classId);
     const gameId = Number(req.params.gameId);
