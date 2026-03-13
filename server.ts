@@ -75,6 +75,12 @@ try {
   hasSubmittedAt = submissionsInfo.some(col => col.name === 'submitted_at');
 } catch (e) {}
 
+let hasAnnouncementPublishAt = false;
+try {
+  const announcementsInfo = db.prepare("PRAGMA table_info(announcements)").all() as any[];
+  hasAnnouncementPublishAt = announcementsInfo.some(col => col.name === 'publish_at');
+} catch (e) {}
+
 // Check if we need to update subjects (if the first class name is the old one)
 let isOldSubjects = false;
 let hasNoStudents = false;
@@ -157,6 +163,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     class_id INTEGER,
     content TEXT NOT NULL,
+    publish_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(class_id) REFERENCES classes(id)
   );
@@ -214,6 +221,14 @@ db.exec(`
     FOREIGN KEY(game_id) REFERENCES class_games(id)
   );
 `);
+
+if (!hasAnnouncementPublishAt) {
+  try {
+    db.exec("ALTER TABLE announcements ADD COLUMN publish_at DATETIME");
+  } catch (e) {
+    // Column may already exist in some environments.
+  }
+}
 
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique ON users(phone) WHERE phone IS NOT NULL");
 
@@ -635,26 +650,7 @@ async function startServer() {
           return res.status(403).json({ error: "ไม่พบรหัสนักศึกษาในระบบ กรุณาให้ครูเพิ่มรายชื่อก่อนเข้าสู่ระบบ" });
         }
 
-        const name = isEmailIdentifier
-          ? `ครู ${rawIdentifier.split("@")[0]}`
-          : `ครู ${normalizedPhone}`;
-
-        const created = await supabase
-          .from("users")
-          .insert({
-            name,
-            student_id: null,
-            email: isEmailIdentifier ? rawIdentifier : null,
-            phone: isPhoneIdentifier ? normalizedPhone : null,
-            role: "teacher"
-          })
-          .select("*")
-          .single();
-
-        if (created.error) {
-          return res.status(500).json({ error: "Failed to create user" });
-        }
-        user = created.data;
+        return res.status(403).json({ error: "บัญชีครูนี้ไม่มีในระบบ กรุณาให้ผู้ดูแลเพิ่มบัญชีก่อนเข้าสู่ระบบ" });
       }
 
       if (user.role === "student") {
@@ -709,18 +705,7 @@ async function startServer() {
         return res.status(403).json({ error: "ไม่พบรหัสนักศึกษาในระบบ กรุณาให้ครูเพิ่มรายชื่อก่อนเข้าสู่ระบบ" });
       }
 
-      const name = isEmailIdentifier
-        ? `ครู ${rawIdentifier.split("@")[0]}`
-        : `ครู ${normalizedPhone}`;
-
-      const info = db.prepare("INSERT INTO users (name, student_id, email, phone, role) VALUES (?, ?, ?, ?, ?)").run(
-        name,
-        null,
-        isEmailIdentifier ? rawIdentifier : null,
-        isPhoneIdentifier ? normalizedPhone : null,
-        "teacher"
-      );
-      user = db.prepare("SELECT * FROM users WHERE id = ?").get(info.lastInsertRowid);
+      return res.status(403).json({ error: "บัญชีครูนี้ไม่มีในระบบ กรุณาให้ผู้ดูแลเพิ่มบัญชีก่อนเข้าสู่ระบบ" });
     }
 
     if (user.role === "student") {
@@ -1863,7 +1848,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/classes/:classId/games/:gameId", async (req, res) => {
+  app.get("/api/classes/:classId/games/:gameId(\\d+)", async (req, res) => {
     const classId = Number(req.params.classId);
     const gameId = Number(req.params.gameId);
     const actorId = Number(req.query.actorId || 0);
@@ -1922,7 +1907,7 @@ async function startServer() {
     return res.json({ game, questions });
   });
 
-  app.patch("/api/classes/:classId/games/:gameId", async (req, res) => {
+  app.patch("/api/classes/:classId/games/:gameId(\\d+)", async (req, res) => {
     const classId = Number(req.params.classId);
     const gameId = Number(req.params.gameId);
     const { actorId, title, description, totalQuestions, timeLimitSec, questions } = req.body as {
@@ -2093,7 +2078,7 @@ async function startServer() {
     return res.json(updated);
   });
 
-  app.delete("/api/classes/:classId/games/:gameId", async (req, res) => {
+  app.delete("/api/classes/:classId/games/:gameId(\\d+)", async (req, res) => {
     const classId = Number(req.params.classId);
     const gameId = Number(req.params.gameId);
     const actorId = Number(req.query.actorId || 0);
@@ -2156,7 +2141,7 @@ async function startServer() {
     return res.json({ success: true });
   });
 
-  app.patch("/api/classes/:classId/games/:gameId/active", async (req, res) => {
+  app.patch("/api/classes/:classId/games/:gameId(\\d+)/active", async (req, res) => {
     const classId = Number(req.params.classId);
     const gameId = Number(req.params.gameId);
     const { actorId, isActive } = req.body as { actorId?: number; isActive?: boolean };
@@ -2314,7 +2299,7 @@ async function startServer() {
     return res.json({ game, questions });
   });
 
-  app.post("/api/classes/:classId/games/:gameId/answer", async (req, res) => {
+  app.post("/api/classes/:classId/games/:gameId(\\d+)/answer", async (req, res) => {
     const classId = Number(req.params.classId);
     const gameId = Number(req.params.gameId);
     const { userId, questionId, choice } = req.body as { userId?: number; questionId?: number; choice?: string };
@@ -2428,12 +2413,36 @@ async function startServer() {
     return res.json(scoreResult.data);
   });
 
-  app.get("/api/classes/:id/attendance", (req, res) => {
-    const { id } = req.params;
+  app.get("/api/classes/:id/attendance", async (req, res) => {
+    const classId = Number(req.params.id);
     const date = String(req.query.date || '').trim();
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return res.status(400).json({ error: "กรุณาระบุวันที่ในรูปแบบ YYYY-MM-DD" });
+    }
+
+    if (!Number.isFinite(classId)) {
+      return res.status(400).json({ error: "Invalid class id" });
+    }
+
+    if (dbProvider === "supabase") {
+      if (!supabase) return res.status(500).json({ error: "Supabase is not configured" });
+
+      try {
+        const result = await supabase
+          .from("attendance_records")
+          .select("student_id, attendance_date, status, checked_at")
+          .eq("class_id", classId)
+          .eq("attendance_date", date);
+
+        if (result.error) {
+          return res.status(500).json({ error: "ไม่สามารถดึงข้อมูลการเช็คชื่อได้" });
+        }
+
+        return res.json({ date, records: result.data || [] });
+      } catch (e) {
+        return res.status(500).json({ error: "ไม่สามารถดึงข้อมูลการเช็คชื่อได้" });
+      }
     }
 
     try {
@@ -2441,7 +2450,7 @@ async function startServer() {
         SELECT student_id, attendance_date, status, checked_at
         FROM attendance_records
         WHERE class_id = ? AND attendance_date = ?
-      `).all(id, date);
+      `).all(classId, date);
 
       res.json({ date, records });
     } catch (e) {
@@ -2450,14 +2459,18 @@ async function startServer() {
   });
 
   app.post("/api/classes/:id/attendance", async (req, res) => {
-    const { id } = req.params;
+    const classId = Number(req.params.id);
     const { actorId, date, records } = req.body as {
       actorId?: number;
       date?: string;
       records?: Array<{ studentId?: number; status?: string }>;
     };
 
-    if (!(await isClassOwnerTeacher(id, actorId))) {
+    if (!Number.isFinite(classId)) {
+      return res.status(400).json({ error: "Invalid class id" });
+    }
+
+    if (!(await isClassOwnerTeacher(classId, actorId))) {
       return res.status(403).json({ error: "ไม่มีสิทธิ์เช็คชื่อในชั้นนี้" });
     }
 
@@ -2471,8 +2484,56 @@ async function startServer() {
     }
 
     const allowedStatus = new Set(["present", "late", "absent"]);
+
+    if (dbProvider === "supabase") {
+      if (!supabase) return res.status(500).json({ error: "Supabase is not configured" });
+
+      const enrollmentResult = await supabase
+        .from("enrollments")
+        .select("user_id")
+        .eq("class_id", classId);
+
+      if (enrollmentResult.error) {
+        return res.status(500).json({ error: "ไม่สามารถตรวจสอบรายชื่อนักเรียนได้" });
+      }
+
+      const enrollmentIds = new Set((enrollmentResult.data || []).map((item) => Number(item.user_id)));
+
+      for (const item of records) {
+        if (!item.studentId || !enrollmentIds.has(Number(item.studentId))) {
+          return res.status(400).json({ error: "พบนักเรียนที่ไม่อยู่ในชั้นเรียนนี้" });
+        }
+        if (!item.status || !allowedStatus.has(item.status)) {
+          return res.status(400).json({ error: "สถานะเช็คชื่อไม่ถูกต้อง" });
+        }
+      }
+
+      try {
+        const payload = records.map((item) => ({
+          class_id: classId,
+          student_id: Number(item.studentId),
+          attendance_date: normalizedDate,
+          status: item.status,
+          checked_by: actorId,
+          checked_at: new Date().toISOString(),
+        }));
+
+        const upsertResult = await supabase
+          .from("attendance_records")
+          .upsert(payload, { onConflict: "class_id,student_id,attendance_date" });
+
+        if (upsertResult.error) {
+          return res.status(500).json({ error: "ไม่สามารถบันทึกข้อมูลการเช็คชื่อได้" });
+        }
+
+        return res.json({ success: true, count: payload.length, date: normalizedDate });
+      } catch (e) {
+        return res.status(500).json({ error: "ไม่สามารถบันทึกข้อมูลการเช็คชื่อได้" });
+      }
+    }
+
     const enrollmentIds = new Set(
-      (db.prepare("SELECT user_id FROM enrollments WHERE class_id = ?").all(id) as Array<{ user_id: number }>).map((item) => item.user_id)
+      (db.prepare("SELECT user_id FROM enrollments WHERE class_id = ?").all(classId) as Array<{ user_id: number }>).map((item) => item.user_id)
     );
 
     for (const item of records) {
@@ -2494,7 +2555,7 @@ async function startServer() {
 
       const trx = db.transaction((items: Array<{ studentId?: number; status?: string }>) => {
         items.forEach((item) => {
-          upsert.run(id, item.studentId, normalizedDate, item.status, actorId);
+          upsert.run(classId, item.studentId, normalizedDate, item.status, actorId);
         });
       });
 
@@ -2506,16 +2567,97 @@ async function startServer() {
   });
 
   app.get("/api/classes/:id/attendance/monthly", async (req, res) => {
-    const { id } = req.params;
+    const classId = Number(req.params.id);
     const month = String(req.query.month || '').trim();
     const actorId = Number(req.query.actorId || 0);
 
-    if (!(await isClassOwnerTeacher(id, actorId))) {
+    if (!Number.isFinite(classId)) {
+      return res.status(400).json({ error: "Invalid class id" });
+    }
+
+    if (!(await isClassOwnerTeacher(classId, actorId))) {
       return res.status(403).json({ error: "ไม่มีสิทธิ์ดูรายงานเช็คชื่อของชั้นนี้" });
     }
 
     if (!/^\d{4}-\d{2}$/.test(month)) {
       return res.status(400).json({ error: "กรุณาระบุเดือนในรูปแบบ YYYY-MM" });
+    }
+
+    if (dbProvider === "supabase") {
+      if (!supabase) return res.status(500).json({ error: "Supabase is not configured" });
+
+      try {
+        const enrollmentsResult = await supabase
+          .from("enrollments")
+          .select("user_id, users(id, name, student_id, role)")
+          .eq("class_id", classId);
+
+        if (enrollmentsResult.error) {
+          return res.status(500).json({ error: "ไม่สามารถดึงรายงานเช็คชื่อรายเดือนได้" });
+        }
+
+        const students = (enrollmentsResult.data || [])
+          .map((row: any) => row.users)
+          .filter((user: any) => user && user.role === "student");
+
+        const monthStart = `${month}-01`;
+        const nextMonthDate = new Date(`${month}-01T00:00:00.000Z`);
+        nextMonthDate.setUTCMonth(nextMonthDate.getUTCMonth() + 1);
+        const monthEnd = nextMonthDate.toISOString().slice(0, 10);
+
+        const studentIds = students.map((student: any) => Number(student.id));
+        let attendanceRows: Array<{ student_id: number; status: string }> = [];
+        if (studentIds.length > 0) {
+          const attendanceResult = await supabase
+            .from("attendance_records")
+            .select("student_id, status")
+            .eq("class_id", classId)
+            .gte("attendance_date", monthStart)
+            .lt("attendance_date", monthEnd)
+            .in("student_id", studentIds);
+
+          if (attendanceResult.error) {
+            return res.status(500).json({ error: "ไม่สามารถดึงรายงานเช็คชื่อรายเดือนได้" });
+          }
+
+          attendanceRows = (attendanceResult.data || []) as Array<{ student_id: number; status: string }>;
+        }
+
+        const summaryMap = new Map<number, {
+          student_id: number;
+          student_name: string;
+          student_code?: string;
+          present_count: number;
+          late_count: number;
+          absent_count: number;
+          checked_count: number;
+        }>();
+        students.forEach((student: any) => {
+          summaryMap.set(Number(student.id), {
+            student_id: Number(student.id),
+            student_name: student.name,
+            student_code: student.student_id || undefined,
+            present_count: 0,
+            late_count: 0,
+            absent_count: 0,
+            checked_count: 0,
+          });
+        });
+
+        attendanceRows.forEach((row) => {
+          const summary = summaryMap.get(Number(row.student_id));
+          if (!summary) return;
+          summary.checked_count += 1;
+          if (row.status === "present") summary.present_count += 1;
+          if (row.status === "late") summary.late_count += 1;
+          if (row.status === "absent") summary.absent_count += 1;
+        });
+
+        const rows = Array.from(summaryMap.values()).sort((a, b) => a.student_name.localeCompare(b.student_name, "th"));
+        return res.json({ month, rows });
+      } catch (e) {
+        return res.status(500).json({ error: "ไม่สามารถดึงรายงานเช็คชื่อรายเดือนได้" });
+      }
     }
 
     try {
@@ -2537,11 +2679,216 @@ async function startServer() {
         WHERE u.role = 'student'
         GROUP BY u.id, u.name, u.student_id
         ORDER BY u.name ASC
-      `).all(id, id, month);
+      `).all(classId, classId, month);
 
       res.json({ month, rows });
     } catch (e) {
       res.status(500).json({ error: "ไม่สามารถดึงรายงานเช็คชื่อรายเดือนได้" });
+    }
+  });
+
+  app.get("/api/classes/:id/vibe-dashboard", async (req, res) => {
+    const classId = Number(req.params.id);
+    const actorId = Number(req.query.actorId || 0);
+    const month = String(req.query.month || '').trim() || new Date().toISOString().slice(0, 7);
+
+    if (!Number.isFinite(classId)) return res.status(400).json({ error: "Invalid class id" });
+    if (!(await isClassOwnerTeacher(classId, actorId))) {
+      return res.status(403).json({ error: "ไม่มีสิทธิ์เข้าถึงข้อมูลนี้" });
+    }
+
+    if (dbProvider === "supabase") {
+      if (!supabase) return res.status(500).json({ error: "Supabase is not configured" });
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const recentDueDateFloor = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+
+        const { data: enrollments } = await supabase
+          .from("enrollments")
+          .select("user_id, users(id, name, profile_picture)")
+          .eq("class_id", classId);
+
+        const studentIds: number[] = (enrollments || []).map((e: any) => e.user_id);
+        const studentNameMap: Record<number, string> = {};
+        (enrollments || []).forEach((e: any) => {
+          if (e.users) studentNameMap[e.user_id] = e.users.name || `Student ${e.user_id}`;
+        });
+
+        const { data: assignments } = await supabase
+          .from("assignments")
+          .select("id, title, due_date")
+          .eq("class_id", classId);
+
+        const allAssignmentIds = (assignments || []).map((a: any) => a.id);
+        const overdueAssignmentIds = (assignments || [])
+          .filter((a: any) => a.due_date && a.due_date < today && a.due_date >= recentDueDateFloor)
+          .map((a: any) => a.id);
+
+        const cutoff48h = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+
+        let allSubmissions: any[] = [];
+        if (allAssignmentIds.length > 0 && studentIds.length > 0) {
+          const { data: subs } = await supabase
+            .from("submissions")
+            .select("assignment_id, student_id, submitted_at")
+            .in("assignment_id", allAssignmentIds)
+            .in("student_id", studentIds)
+            .order("submitted_at", { ascending: false });
+          allSubmissions = subs || [];
+        }
+
+        // Late students: enrolled students missing overdue assignments
+        const lateStudentMap: Record<number, { student_id: number; name: string; overdue_count: number }> = {};
+        if (overdueAssignmentIds.length > 0 && studentIds.length > 0) {
+          const submittedSet = new Set(
+            allSubmissions
+              .filter((s: any) => overdueAssignmentIds.includes(s.assignment_id))
+              .map((s: any) => `${s.assignment_id}:${s.student_id}`)
+          );
+          for (const assignId of overdueAssignmentIds) {
+            for (const sid of studentIds) {
+              if (!submittedSet.has(`${assignId}:${sid}`)) {
+                if (!lateStudentMap[sid]) lateStudentMap[sid] = { student_id: sid, name: studentNameMap[sid] || `Student ${sid}`, overdue_count: 0 };
+                lateStudentMap[sid].overdue_count++;
+              }
+            }
+          }
+        }
+        const lateStudents = Object.values(lateStudentMap)
+          .sort((a, b) => b.overdue_count - a.overdue_count)
+          .slice(0, 10);
+
+        // Recent submissions
+        const recentSubmissions = allSubmissions
+          .filter((s: any) => s.submitted_at >= cutoff48h)
+          .slice(0, 10)
+          .map((s: any) => ({
+            student_id: s.student_id,
+            name: studentNameMap[s.student_id] || `Student ${s.student_id}`,
+            submitted_at: s.submitted_at,
+            assignment_title: (assignments || []).find((a: any) => a.id === s.assignment_id)?.title || '',
+          }));
+
+        // Top scorers
+        const { data: scores } = await supabase
+          .from("leaderboard_scores")
+          .select("user_id, score, users(name, profile_picture)")
+          .eq("class_id", classId)
+          .order("score", { ascending: false })
+          .limit(5);
+
+        const topScorers = (scores || []).map((s: any, i: number) => ({
+          user_id: s.user_id,
+          name: (s.users as any)?.name || `Student ${s.user_id}`,
+          profile_picture: (s.users as any)?.profile_picture || null,
+          score: s.score,
+          rank: i + 1,
+        }));
+
+        // Low attendance this month
+        const monthStart = `${month}-01`;
+        const nextMonthDate = new Date(month + '-01');
+        nextMonthDate.setMonth(nextMonthDate.getMonth() + 1);
+        const monthEnd = nextMonthDate.toISOString().slice(0, 10);
+
+        let attendanceRows: any[] = [];
+        if (studentIds.length > 0) {
+          const { data: attRows } = await supabase
+            .from("attendance_records")
+            .select("student_id, status")
+            .eq("class_id", classId)
+            .gte("attendance_date", monthStart)
+            .lt("attendance_date", monthEnd)
+            .in("student_id", studentIds);
+          attendanceRows = attRows || [];
+        }
+
+        const attendanceByStudent: Record<number, { checked: number; attended: number; absent: number }> = {};
+        attendanceRows.forEach((ar: any) => {
+          if (!attendanceByStudent[ar.student_id]) attendanceByStudent[ar.student_id] = { checked: 0, attended: 0, absent: 0 };
+          attendanceByStudent[ar.student_id].checked++;
+          if (ar.status === 'present' || ar.status === 'late') attendanceByStudent[ar.student_id].attended++;
+          if (ar.status === 'absent') attendanceByStudent[ar.student_id].absent++;
+        });
+
+        const lowAttendance = Object.entries(attendanceByStudent)
+          .filter(([, v]) => v.checked > 0 && v.absent > 0)
+          .map(([sid, v]) => ({
+            student_id: Number(sid),
+            name: studentNameMap[Number(sid)] || `Student ${sid}`,
+            absent_count: v.absent,
+            attendance_rate: Math.round(v.attended / v.checked * 100),
+          }))
+          .sort((a, b) => {
+            if (b.absent_count !== a.absent_count) return b.absent_count - a.absent_count;
+            return a.attendance_rate - b.attendance_rate;
+          });
+
+        return res.json({ lateStudents, recentSubmissions, topScorers, lowAttendance });
+      } catch (e) {
+        return res.status(500).json({ error: "ไม่สามารถดึงข้อมูล vibe dashboard ได้" });
+      }
+    } else {
+      // SQLite path
+      try {
+        const lateStudents = db.prepare(`
+          SELECT u.id AS student_id, u.name, COUNT(*) AS overdue_count
+          FROM users u
+          JOIN enrollments e ON e.user_id = u.id AND e.class_id = ?
+          JOIN assignments a ON a.class_id = ? AND a.due_date < date('now') AND a.due_date >= date('now', '-30 day')
+          LEFT JOIN submissions s ON s.assignment_id = a.id AND s.student_id = u.id
+          WHERE u.role = 'student' AND s.id IS NULL
+          GROUP BY u.id, u.name
+          ORDER BY overdue_count DESC
+          LIMIT 10
+        `).all(classId, classId);
+
+        const recentSubmissions = db.prepare(`
+          SELECT s.submitted_at, u.id AS student_id, u.name, a.title AS assignment_title
+          FROM submissions s
+          JOIN users u ON u.id = s.student_id
+          JOIN assignments a ON a.id = s.assignment_id
+          WHERE a.class_id = ? AND s.submitted_at >= datetime('now', '-48 hours')
+          ORDER BY s.submitted_at DESC
+          LIMIT 10
+        `).all(classId);
+
+        const topScorersRaw = db.prepare(`
+          SELECT ls.user_id, u.name, u.profile_picture, ls.score
+          FROM leaderboard_scores ls
+          JOIN users u ON u.id = ls.user_id
+          WHERE ls.class_id = ?
+          ORDER BY ls.score DESC
+          LIMIT 5
+        `).all(classId);
+        const topScorers = (topScorersRaw as any[]).map((s, i) => ({ ...s, rank: i + 1 }));
+
+        const lowAttRaw = db.prepare(`
+          SELECT u.id AS student_id, u.name,
+            COALESCE(COUNT(ar.id), 0) AS checked_count,
+            COALESCE(SUM(CASE WHEN ar.status = 'absent' THEN 1 ELSE 0 END), 0) AS absent_count,
+            COALESCE(SUM(CASE WHEN ar.status IN ('present', 'late') THEN 1 ELSE 0 END), 0) AS attended_count
+          FROM users u
+          JOIN enrollments e ON e.user_id = u.id AND e.class_id = ?
+          LEFT JOIN attendance_records ar ON ar.class_id = ? AND ar.student_id = u.id
+            AND substr(ar.attendance_date, 1, 7) = ?
+          WHERE u.role = 'student'
+          GROUP BY u.id, u.name
+          HAVING checked_count > 0 AND absent_count > 0
+          ORDER BY absent_count DESC, attended_count * 1.0 / checked_count ASC
+        `).all(classId, classId, month);
+
+        const lowAttendance = (lowAttRaw as any[]).map(r => ({
+          student_id: r.student_id,
+          name: r.name,
+          absent_count: r.absent_count,
+          attendance_rate: Math.round(r.attended_count / r.checked_count * 100),
+        }));
+
+        return res.json({ lateStudents, recentSubmissions, topScorers, lowAttendance });
+      } catch (e) {
+        return res.status(500).json({ error: "ไม่สามารถดึงข้อมูล vibe dashboard ได้" });
+      }
     }
   });
 
@@ -2559,15 +2906,167 @@ async function startServer() {
     res.json({ id: info.lastInsertRowid });
   });
 
-  app.get("/api/classes/:id/announcements", (req, res) => {
-    const announcements = db.prepare("SELECT * FROM announcements WHERE class_id = ? ORDER BY created_at DESC").all(req.params.id);
-    res.json(announcements);
+  app.get("/api/classes/:id/announcements", async (req, res) => {
+    const classId = Number(req.params.id);
+    const includeScheduled = String(req.query.includeScheduled || "0") === "1";
+    const actorId = Number(req.query.actorId || 0);
+
+    if (!Number.isFinite(classId)) {
+      return res.status(400).json({ error: "Invalid class id" });
+    }
+
+    if (dbProvider === "supabase") {
+      if (!supabase) return res.status(500).json({ error: "Supabase is not configured" });
+
+      if (includeScheduled && !(await isClassOwnerTeacher(classId, actorId))) {
+        return res.status(403).json({ error: "ไม่มีสิทธิ์ดูประกาศที่ตั้งเวลาไว้" });
+      }
+
+      let query = supabase
+        .from("announcements")
+        .select("id, class_id, content, created_at")
+        .eq("class_id", classId)
+        .order("created_at", { ascending: false });
+
+      if (!includeScheduled) {
+        query = query.lte("created_at", new Date().toISOString());
+      }
+
+      const result = await query;
+      if (result.error) {
+        return res.status(500).json({ error: "ไม่สามารถดึงประกาศได้" });
+      }
+
+      const nowTime = Date.now();
+      const rows = (result.data || []).map((row) => {
+        const createdAt = String(row.created_at || "");
+        const createdAtMillis = createdAt ? new Date(createdAt).getTime() : 0;
+        const isScheduled = Number.isFinite(createdAtMillis) && createdAtMillis > nowTime;
+
+        return {
+          ...row,
+          publish_at: isScheduled ? createdAt : null
+        };
+      });
+
+      return res.json(rows);
+    }
+
+    if (includeScheduled) {
+      if (!(await isClassOwnerTeacher(classId, actorId))) {
+        return res.status(403).json({ error: "ไม่มีสิทธิ์ดูประกาศที่ตั้งเวลาไว้" });
+      }
+
+      const announcements = db
+        .prepare(`
+          SELECT *
+          FROM announcements
+          WHERE class_id = ?
+          ORDER BY COALESCE(publish_at, created_at) DESC, created_at DESC
+        `)
+        .all(classId);
+      return res.json(announcements);
+    }
+
+    const announcements = db
+      .prepare(`
+        SELECT *
+        FROM announcements
+        WHERE class_id = ?
+          AND (publish_at IS NULL OR datetime(publish_at) <= datetime('now'))
+        ORDER BY COALESCE(publish_at, created_at) DESC, created_at DESC
+      `)
+      .all(classId);
+    return res.json(announcements);
   });
 
   app.post("/api/announcements", (req, res) => {
-    const { classId, content } = req.body;
-    const info = db.prepare("INSERT INTO announcements (class_id, content) VALUES (?, ?)").run(classId, content);
-    res.json({ id: info.lastInsertRowid });
+    const { classId, content, publishAt } = req.body;
+    const parsedPublishAt = publishAt ? new Date(String(publishAt)) : null;
+
+    if (parsedPublishAt && Number.isNaN(parsedPublishAt.getTime())) {
+      return res.status(400).json({ error: "รูปแบบเวลาที่ตั้งโพสต์ไม่ถูกต้อง" });
+    }
+
+    if (dbProvider === "supabase") {
+      if (!supabase) return res.status(500).json({ error: "Supabase is not configured" });
+
+      const createdAtValue = parsedPublishAt ? parsedPublishAt.toISOString() : new Date().toISOString();
+      supabase
+        .from("announcements")
+        .insert({ class_id: classId, content, created_at: createdAtValue })
+        .select("id, created_at")
+        .single()
+        .then(({ data, error }) => {
+          if (error || !data) {
+            return res.status(500).json({ error: "ไม่สามารถโพสต์ประกาศได้" });
+          }
+
+          return res.json({
+            id: data.id,
+            publish_at: parsedPublishAt ? String(data.created_at) : null
+          });
+        });
+      return;
+    }
+
+    const publishAtValue = parsedPublishAt
+      ? parsedPublishAt.toISOString().slice(0, 19).replace("T", " ")
+      : null;
+    const info = db
+      .prepare("INSERT INTO announcements (class_id, content, publish_at) VALUES (?, ?, ?)")
+      .run(classId, content, publishAtValue);
+
+    res.json({ id: info.lastInsertRowid, publish_at: publishAtValue });
+  });
+
+  app.delete("/api/announcements/:id", async (req, res) => {
+    const announcementId = Number(req.params.id);
+    const actorId = Number(req.query.actorId || req.body?.actorId || 0);
+
+    if (!Number.isFinite(announcementId) || !Number.isFinite(actorId)) {
+      return res.status(400).json({ error: "Invalid announcement id or actor id" });
+    }
+
+    if (dbProvider === "supabase") {
+      if (!supabase) return res.status(500).json({ error: "Supabase is not configured" });
+
+      const announcementResult = await supabase
+        .from("announcements")
+        .select("id, class_id")
+        .eq("id", announcementId)
+        .maybeSingle();
+
+      if (announcementResult.error || !announcementResult.data) {
+        return res.status(404).json({ error: "ไม่พบประกาศ" });
+      }
+
+      if (!(await isClassOwnerTeacher(announcementResult.data.class_id, actorId))) {
+        return res.status(403).json({ error: "ไม่มีสิทธิ์ลบประกาศนี้" });
+      }
+
+      const deleted = await supabase.from("announcements").delete().eq("id", announcementId);
+      if (deleted.error) {
+        return res.status(500).json({ error: "ไม่สามารถลบประกาศได้" });
+      }
+
+      return res.json({ ok: true });
+    }
+
+    const announcement = db
+      .prepare("SELECT id, class_id FROM announcements WHERE id = ?")
+      .get(announcementId) as { id: number; class_id: number } | undefined;
+
+    if (!announcement) {
+      return res.status(404).json({ error: "ไม่พบประกาศ" });
+    }
+
+    if (!(await isClassOwnerTeacher(announcement.class_id, actorId))) {
+      return res.status(403).json({ error: "ไม่มีสิทธิ์ลบประกาศนี้" });
+    }
+
+    db.prepare("DELETE FROM announcements WHERE id = ?").run(announcementId);
+    return res.json({ ok: true });
   });
 
   // Vite middleware for development

@@ -156,6 +156,49 @@ const getClassColorTheme = (classroom: Classroom) => {
   return CLASS_COLOR_THEMES[hash % CLASS_COLOR_THEMES.length];
 };
 
+const escapeHtml = (raw: string): string =>
+  raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+
+interface VibeDashboardData {
+  lateStudents: Array<{ student_id: number; name: string; overdue_count: number }>;
+  recentSubmissions: Array<{ student_id: number; name: string; submitted_at: string; assignment_title: string }>;
+  topScorers: Array<{ user_id: number; name: string; profile_picture?: string | null; score: number; rank: number }>;
+  lowAttendance: Array<{ student_id: number; name: string; absent_count: number; attendance_rate: number }>;
+}
+
+function timeAgo(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'เพิ่งส่ง';
+  if (mins < 60) return `${mins} นาทีที่แล้ว`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} ชม. ที่แล้ว`;
+  return `${Math.floor(hours / 24)} วันที่แล้ว`;
+}
+
+const formatAnnouncementHtml = (content: string): string => {
+  let html = escapeHtml(content || '');
+
+  html = html.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer" class="font-semibold text-sky-700 underline decoration-2 underline-offset-2">$1</a>'
+  );
+
+  html = html.replace(/\*\*\*([^*\n]+)\*\*\*/g, '<strong><em>$1</em></strong>');
+  html = html.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<em>$1</em>');
+  html = html.replace(/__([^_\n]+)__/g, '<u>$1</u>');
+  html = html.replace(/&lt;u&gt;([\s\S]*?)&lt;\/u&gt;/g, '<u>$1</u>');
+  html = html.replace(/\n/g, '<br />');
+
+  return html;
+};
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [users, setUsers] = useState<User[]>([]);
@@ -172,6 +215,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [classSearchQuery, setClassSearchQuery] = useState('');
   const [authTab, setAuthTab] = useState<'student' | 'teacher'>('student');
+  const [authError, setAuthError] = useState('');
   const [classToDelete, setClassToDelete] = useState<Classroom | null>(null);
   const [isDeletingClass, setIsDeletingClass] = useState(false);
   const [selectedRankClassId, setSelectedRankClassId] = useState<number | null>(null);
@@ -243,26 +287,36 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ identifier: trimmedIdentifier })
     });
-    const user = await res.json();
+    const user = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(typeof user?.error === 'string' ? user.error : 'เข้าสู่ระบบไม่สำเร็จ');
+    }
+
     if (user.id) {
       setCurrentUser(user);
+      setAuthError('');
       fetchClasses(user.id);
       setUsers(prev => {
         if (prev.find(u => u.id === user.id)) return prev;
         return [...prev, user];
       });
+      return;
     }
+
+    throw new Error('ไม่พบบัญชีผู้ใช้ในระบบ');
   };
 
   const handleAuthLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const identifier = new FormData(e.currentTarget).get('identifier') as string;
     if (!identifier) return;
+    setAuthError('');
 
     try {
       await loginByIdentifier(identifier);
     } catch (error) {
       console.error("Login Error", error);
+      setAuthError(String((error as any)?.message || 'เข้าสู่ระบบไม่สำเร็จ'));
     }
   };
 
@@ -515,7 +569,10 @@ export default function App() {
             <div className="mb-6 flex rounded-[15px] bg-[#F3F3F3] p-[5px]">
               <button
                 type="button"
-                onClick={() => setAuthTab('student')}
+                onClick={() => {
+                  setAuthTab('student');
+                  setAuthError('');
+                }}
                 className={`flex flex-1 items-center justify-center gap-2 rounded-[12px] px-4 py-2.5 text-sm font-semibold transition-all ${
                   authTab === 'student'
                     ? 'border border-[#F8E3E6] bg-white text-[#EC2D8B]'
@@ -527,7 +584,10 @@ export default function App() {
               </button>
               <button
                 type="button"
-                onClick={() => setAuthTab('teacher')}
+                onClick={() => {
+                  setAuthTab('teacher');
+                  setAuthError('');
+                }}
                 className={`flex flex-1 items-center justify-center gap-2 rounded-[12px] px-4 py-2.5 text-sm font-semibold transition-all ${
                   authTab === 'teacher'
                     ? 'border border-[#F8E3E6] bg-white text-[#EC2D8B]'
@@ -552,6 +612,11 @@ export default function App() {
               >
                 LET'S GO! 🚀
               </button>
+              {authError && (
+                <p className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-600">
+                  {authError}
+                </p>
+              )}
             </form>
           </div>
         </motion.div>
@@ -844,6 +909,9 @@ export default function App() {
                     </aside>
                   )}
                 </div>
+                {isTeacher && classes.length > 0 && (
+                  <TeacherVibeBoard classes={classes} currentUser={currentUser!} />
+                )}
               </motion.div>
             ) : (
               <ClassView
@@ -1092,6 +1160,245 @@ export default function App() {
   );
 }
 
+const TRACK_POSITIONS = [
+  { left: '72%', top: '12%' },
+  { left: '82%', top: '52%' },
+  { left: '55%', top: '78%' },
+  { left: '22%', top: '70%' },
+  { left: '10%', top: '35%' },
+];
+
+const TeacherVibeBoard: React.FC<{ classes: Classroom[]; currentUser: User }> = ({ classes, currentUser }) => {
+  const [selectedClassId, setSelectedClassId] = useState<number | null>(classes[0]?.id ?? null);
+  const [data, setData] = useState<VibeDashboardData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [attendanceSearch, setAttendanceSearch] = useState('');
+
+  useEffect(() => {
+    if (classes.length === 0) {
+      setSelectedClassId(null);
+      return;
+    }
+
+    if (!selectedClassId || !classes.some((cls) => cls.id === selectedClassId)) {
+      setSelectedClassId(classes[0].id);
+    }
+  }, [classes, selectedClassId]);
+
+  useEffect(() => {
+    if (!selectedClassId) return;
+    setLoading(true);
+    setData(null);
+    setLoadError('');
+    const now = new Date();
+    const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    fetch(`/api/classes/${selectedClassId}/vibe-dashboard?actorId=${currentUser.id}&month=${month}`)
+      .then(async (response) => {
+        if (!response.ok) {
+          const body = await response.text();
+          throw new Error(body || 'โหลดข้อมูลไม่สำเร็จ');
+        }
+        return response.json();
+      })
+      .then((dashboardData) => {
+        setData(dashboardData);
+        setLoading(false);
+      })
+      .catch(() => {
+        setLoadError('ไม่สามารถโหลดข้อมูลแดชบอร์ดได้');
+        setLoading(false);
+      });
+  }, [selectedClassId, currentUser.id]);
+
+  const maxScore = data?.topScorers?.[0]?.score || 1;
+  const normalizedAttendanceSearch = attendanceSearch.trim().toLowerCase();
+  const filteredAbsentStudents = (data?.lowAttendance || []).filter((student) =>
+    student.name.toLowerCase().includes(normalizedAttendanceSearch)
+  );
+
+  return (
+    <div className="mt-8 rounded-3xl bg-[#E8E1F5] p-5 shadow-[0_14px_30px_rgba(75,46,114,0.18)]">
+      {/* Header */}
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-white/60 px-5 py-4 shadow-sm backdrop-blur-sm">
+        <h2 className="text-xl font-black text-[#6B4E90]">🎓 แดชบอร์ดเช็คไวบ์ห้องเรียน</h2>
+        <select
+          value={selectedClassId ?? ''}
+          onChange={e => setSelectedClassId(Number(e.target.value))}
+          className="rounded-xl border border-[#D9CCE7] bg-white px-3 py-2 text-sm font-semibold text-[#4E3E62] outline-none focus:ring-2 focus:ring-[#CAB5DD]"
+        >
+          {classes.map(cls => <option key={cls.id} value={cls.id}>{cls.name}</option>)}
+        </select>
+      </div>
+
+      {loading && (
+        <div className="flex h-48 items-center justify-center rounded-2xl bg-white/40 text-sm font-bold text-[#7A6491]">
+          กำลังโหลด...
+        </div>
+      )}
+
+      {!loading && !data && (
+        <div className="flex h-48 items-center justify-center rounded-2xl bg-white/40 text-sm font-bold text-[#7A6491]">
+          {loadError || 'ไม่สามารถโหลดข้อมูลได้'}
+        </div>
+      )}
+
+      {!loading && data && (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
+
+          {/* Left: Assignment status */}
+          <div className="flex flex-col gap-4 rounded-3xl border-4 border-[#CAB5DD] bg-[#F4EFFF] p-4 shadow-md lg:col-span-1">
+            <h3 className="text-center text-base font-extrabold text-[#6B4E90]">📝 เช็คสถานะงาน</h3>
+
+            <div className="rounded-2xl bg-[#FFE8E8] p-3 shadow-inner">
+              <p className="mb-2 font-bold text-[#D93838]">🚫 แก๊งดองงาน (30 วันล่าสุด)</p>
+              {data.lateStudents.length === 0 ? (
+                <p className="text-center text-xs font-semibold text-[#999]">ทุกคนส่งงานครบ 🎉</p>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {data.lateStudents.map(s => (
+                    <div key={s.student_id} className="flex items-center justify-between text-sm font-semibold">
+                      <span>👤 {s.name.split(' ')[0]}</span>
+                      <span className="text-[#D93838]">⚠️ {s.overdue_count}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-2xl bg-[#E6F8F0] p-3 shadow-inner">
+              <p className="mb-2 font-bold text-[#2B8A61]">✨ เพิ่งส่งร้อนๆ</p>
+              {data.recentSubmissions.length === 0 ? (
+                <p className="text-center text-xs font-semibold text-[#999]">ยังไม่มีการส่งงาน</p>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {data.recentSubmissions.map((s, i) => (
+                    <div key={i} className="flex items-center justify-between text-sm font-semibold">
+                      <span>👤 {s.name.split(' ')[0]}</span>
+                      <span className="text-xs text-[#888]">{timeAgo(s.submitted_at)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Center: Score track */}
+          <div className="flex flex-col items-center rounded-3xl border-4 border-[#CAB5DD] bg-white p-4 shadow-md lg:col-span-2">
+            <span className="mb-3 rounded-full bg-[#D9F1DF] px-6 py-1 text-base font-extrabold text-[#2B8A61] shadow-sm">
+              🏁 ลู่วิ่งสู่เกรด 4
+            </span>
+
+            {data.topScorers.length === 0 ? (
+              <div className="flex flex-1 items-center justify-center py-12 text-sm font-bold text-[#A0A0A0]">
+                ยังไม่มีข้อมูลคะแนน
+              </div>
+            ) : (
+              <>
+                {/* Oval track */}
+                <div className="relative mx-auto my-2 h-[200px] w-full max-w-[340px]">
+                  <div className="absolute inset-0 rounded-[50%] border-[16px] border-[#E5DAF5]" />
+                  <div className="absolute inset-3 rounded-[50%] border-[14px] border-[#D0EBE2]" />
+                  <div className="absolute inset-6 rounded-[50%] border-[12px] border-[#F1E9F6]" />
+                  <div className="absolute inset-[38px] flex items-center justify-center rounded-[50%] bg-[#FAFAFA]">
+                    <p className="text-center text-[10px] font-bold leading-relaxed text-[#A0A0A0]">คะแนน<br/>เก็บรวม</p>
+                  </div>
+                  {/* Finish flag */}
+                  <div className="absolute right-[-6px] top-1/2 -translate-y-1/2 text-xl">🏁</div>
+                  {/* Runner avatars */}
+                  {data.topScorers.map((scorer, i) => {
+                    const pos = TRACK_POSITIONS[i];
+                    const rankEmoji = i === 0 ? '👑' : i === 1 ? '⭐' : i === 2 ? '🌟' : '🎯';
+                    return (
+                      <div
+                        key={scorer.user_id}
+                        className="absolute flex flex-col items-center"
+                        style={{ left: pos.left, top: pos.top, transform: 'translate(-50%, -50%)' }}
+                      >
+                        <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full border-2 border-white bg-[#E8DFF5] shadow-md">
+                          {scorer.profile_picture ? (
+                            <img src={scorer.profile_picture} className="h-full w-full object-cover" referrerPolicy="no-referrer" />
+                          ) : (
+                            <span className="text-base">{rankEmoji}</span>
+                          )}
+                        </div>
+                        <span className="mt-0.5 max-w-[52px] truncate rounded-full bg-white/90 px-1.5 py-0.5 text-[9px] font-extrabold text-[#6B4E90] shadow-sm">
+                          {scorer.name.split(' ')[0]}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Score bars */}
+                <div className="mt-2 w-full space-y-2 px-2">
+                  {data.topScorers.map(scorer => (
+                    <div key={scorer.user_id} className="flex items-center gap-2">
+                      <span className="w-5 text-center text-xs font-bold text-[#9678B6]">#{scorer.rank}</span>
+                      <span className="w-[72px] truncate text-xs font-semibold text-[#4E3E62]">{scorer.name.split(' ')[0]}</span>
+                      <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-[#F1E9F6]">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-[#9678B6] to-[#EC2D8B] transition-all duration-500"
+                          style={{ width: `${Math.max(4, Math.round(scorer.score / maxScore * 100))}%` }}
+                        />
+                      </div>
+                      <span className="w-10 text-right text-xs font-bold text-[#6B4E90]">{scorer.score}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            <div className="mt-4 flex gap-4 text-xs font-bold">
+              <span className="text-[#E5B800]">👑 ตัวตึง</span>
+              <span className="text-[#9678B6]">⭐ ดาวรุ่ง</span>
+              <span className="text-[#888]">❓ สภาพพพ</span>
+            </div>
+          </div>
+
+          {/* Right: Attendance alerts */}
+          <div className="flex flex-col gap-4 rounded-3xl border-4 border-[#CAB5DD] bg-[#FFF5EE] p-4 shadow-md lg:col-span-1">
+            <h3 className="text-center text-base font-extrabold text-[#D97706]">📊 สรุปการมาเรียน</h3>
+            <p className="text-center text-xs font-bold text-[#888]">(แสดงเฉพาะนักเรียนที่ขาดเรียนในเดือนนี้)</p>
+
+            <input
+              type="text"
+              value={attendanceSearch}
+              onChange={(e) => setAttendanceSearch(e.target.value)}
+              placeholder="ค้นหาชื่อนักเรียน..."
+              className="w-full rounded-xl border border-[#E7DCCF] bg-white px-3 py-2 text-sm text-[#5A4C40] outline-none focus:ring-2 focus:ring-[#CAB5DD]"
+            />
+
+            {data.lowAttendance.length === 0 ? (
+              <div className="flex flex-1 items-center justify-center py-6 text-sm font-bold text-[#999]">
+                ทุกคนมาเรียนดีมาก 🎉
+              </div>
+            ) : filteredAbsentStudents.length === 0 ? (
+              <div className="flex flex-1 items-center justify-center py-6 text-sm font-bold text-[#999]">
+                ไม่พบชื่อนักเรียนที่ค้นหา
+              </div>
+            ) : (
+              <div className="mt-1 flex flex-col gap-3">
+                {filteredAbsentStudents.map(s => {
+                  return (
+                    <div key={s.student_id} className="flex items-center justify-between rounded-xl bg-white p-2 shadow-sm">
+                      <span className="text-sm font-bold">👤 {s.name.split(' ')[0]}</span>
+                      <div className="flex items-center gap-1 font-bold text-[#D93838]">
+                        ❌ {s.absent_count} ครั้ง
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ClassCard: React.FC<{ classroom: Classroom, onClick: () => void, onDelete?: () => void, canDelete?: boolean }> = ({ classroom, onClick, onDelete, canDelete }) => {
   const theme = getClassColorTheme(classroom);
 
@@ -1145,6 +1452,8 @@ const ClassCard: React.FC<{ classroom: Classroom, onClick: () => void, onDelete?
 };
 
 const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User[], onBack: () => void }> = ({ classroom, currentUser, users, onBack }) => {
+  type AttachmentLinkType = 'drive' | 'youtube' | 'link';
+
   const classTheme = getClassColorTheme(classroom);
   const [tab, setTab] = useState<'stream' | 'classwork' | 'people' | 'attendance'>('stream');
   const [classworkMenu, setClassworkMenu] = useState<'assignments' | 'game'>('assignments');
@@ -1152,6 +1461,15 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [games, setGames] = useState<ClassroomGame[]>([]);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [announcementDraft, setAnnouncementDraft] = useState('');
+  const [isLinkModalOpen, setIsLinkModalOpen] = useState(false);
+  const [linkModalType, setLinkModalType] = useState<AttachmentLinkType>('link');
+  const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
+  const [scheduleDateTimeInput, setScheduleDateTimeInput] = useState('');
+  const [scheduleDateTimeError, setScheduleDateTimeError] = useState('');
+  const [linkInput, setLinkInput] = useState('');
+  const [linkInputError, setLinkInputError] = useState('');
+  const [isPostMenuOpen, setIsPostMenuOpen] = useState(false);
   const [isCreateGameOpen, setIsCreateGameOpen] = useState(false);
   const [isCreatingGame, setIsCreatingGame] = useState(false);
   const [editingGameId, setEditingGameId] = useState<number | null>(null);
@@ -1197,6 +1515,8 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
   const [studentSearchInput, setStudentSearchInput] = useState('');
   const [studentSearch, setStudentSearch] = useState('');
   const excelInputRef = useRef<HTMLInputElement | null>(null);
+  const announcementFileInputRef = useRef<HTMLInputElement | null>(null);
+  const postMenuRef = useRef<HTMLDivElement | null>(null);
   const [attendanceDate, setAttendanceDate] = useState(() => {
     const today = new Date();
     today.setMinutes(today.getMinutes() - today.getTimezoneOffset());
@@ -1243,6 +1563,29 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
     if (tab !== 'attendance') return;
     fetchMonthlyAttendanceReport(reportMonth);
   }, [reportMonth, tab]);
+
+  useEffect(() => {
+    if (tab !== 'stream' || currentUser.role !== 'teacher') return;
+    const key = `announcement-draft-${classroom.id}`;
+    const saved = localStorage.getItem(key);
+    if (saved && !announcementDraft.trim()) {
+      setAnnouncementDraft(saved);
+    }
+  }, [classroom.id, currentUser.role, tab]);
+
+  useEffect(() => {
+    if (!isPostMenuOpen) return;
+
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (!postMenuRef.current) return;
+      if (!postMenuRef.current.contains(event.target as Node)) {
+        setIsPostMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [isPostMenuOpen]);
 
   const fetchAttendanceForDate = async (date: string, students: User[]) => {
     if (students.length === 0) {
@@ -1330,7 +1673,10 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
       const [assResult, gamesResult, annResult, peopleResult] = await Promise.allSettled([
         fetch(`/api/classes/${classroom.id}/assignments?userId=${currentUser.id}`),
         fetch(`/api/classes/${classroom.id}/games?userId=${currentUser.id}`),
-        fetch(`/api/classes/${classroom.id}/announcements`),
+        fetch(`/api/classes/${classroom.id}/announcements?${new URLSearchParams({
+          includeScheduled: currentUser.role === 'teacher' ? '1' : '0',
+          actorId: String(currentUser.id)
+        }).toString()}`),
         fetch(`/api/classes/${classroom.id}/people`)
       ]);
 
@@ -2212,20 +2558,200 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
   const nextMonth = () => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1));
   const prevMonth = () => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1));
 
-  const postAnnouncement = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const content = new FormData(e.currentTarget).get('content') as string;
-    if (!content) return;
+  const toDateTimeLocalValue = (date: Date) => {
+    const next = new Date(date);
+    next.setMinutes(next.getMinutes() - next.getTimezoneOffset());
+    return next.toISOString().slice(0, 16);
+  };
+
+  const openScheduleModal = () => {
+    const seedDate = new Date(Date.now() + 10 * 60 * 1000);
+    setScheduleDateTimeInput(toDateTimeLocalValue(seedDate));
+    setScheduleDateTimeError('');
+    setIsPostMenuOpen(false);
+    setIsScheduleModalOpen(true);
+  };
+
+  const closeScheduleModal = () => {
+    setIsScheduleModalOpen(false);
+    setScheduleDateTimeError('');
+  };
+
+  const submitAnnouncement = async (publishAt?: string) => {
+    setIsPostMenuOpen(false);
+
+    const content = announcementDraft.trim();
+    if (!content) {
+      showToast('error', 'กรุณาพิมพ์เนื้อหาประกาศก่อนโพสต์');
+      return;
+    }
 
     const res = await fetch('/api/announcements', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ classId: classroom.id, content })
+      body: JSON.stringify({ classId: classroom.id, content, publishAt: publishAt || null })
     });
 
     if (res.ok) {
-      e.currentTarget.reset();
+      setAnnouncementDraft('');
+      localStorage.removeItem(`announcement-draft-${classroom.id}`);
       fetchClassData();
+      if (publishAt) {
+        showToast('success', `ตั้งเวลาโพสต์แล้ว (${new Date(publishAt).toLocaleString()})`);
+      } else {
+        showToast('success', 'โพสต์ประกาศเรียบร้อยแล้ว');
+      }
+      return;
+    }
+
+    const message = await getBackendErrorMessage(res, 'ไม่สามารถโพสต์ประกาศได้');
+    showToast('error', message);
+  };
+
+  const postAnnouncement = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    await submitAnnouncement();
+  };
+
+  const submitScheduledAnnouncement = async () => {
+    if (!announcementDraft.trim()) {
+      showToast('error', 'กรุณาพิมพ์เนื้อหาประกาศก่อนตั้งเวลาโพสต์');
+      return;
+    }
+
+    const raw = scheduleDateTimeInput.trim();
+    if (!raw) {
+      setScheduleDateTimeError('*จำเป็น');
+      return;
+    }
+
+    const scheduledDate = new Date(raw);
+    if (Number.isNaN(scheduledDate.getTime())) {
+      setScheduleDateTimeError('รูปแบบวันเวลาไม่ถูกต้อง');
+      return;
+    }
+
+    if (scheduledDate.getTime() <= Date.now()) {
+      setScheduleDateTimeError('เวลาโพสต์ต้องเป็นอนาคต');
+      return;
+    }
+
+    await submitAnnouncement(scheduledDate.toISOString());
+    closeScheduleModal();
+  };
+
+  const saveAnnouncementDraft = () => {
+    const content = announcementDraft.trim();
+    if (!content) {
+      showToast('error', 'ยังไม่มีเนื้อหาให้บันทึกร่าง');
+      return;
+    }
+
+    localStorage.setItem(`announcement-draft-${classroom.id}`, announcementDraft);
+    setIsPostMenuOpen(false);
+    showToast('success', 'บันทึกร่างลงเครื่องแล้ว');
+  };
+
+  const addDraftLine = (line: string) => {
+    setAnnouncementDraft((prev) => {
+      if (!prev.trim()) return line;
+      if (prev.endsWith('\n')) return `${prev}${line}`;
+      return `${prev}\n${line}`;
+    });
+  };
+
+  const handleDriveAttachment = () => {
+    setLinkModalType('drive');
+    setLinkInput('');
+    setLinkInputError('');
+    setIsLinkModalOpen(true);
+  };
+
+  const handleYoutubeAttachment = () => {
+    setLinkModalType('youtube');
+    setLinkInput('');
+    setLinkInputError('');
+    setIsLinkModalOpen(true);
+  };
+
+  const handleLinkAttachment = () => {
+    setLinkModalType('link');
+    setIsLinkModalOpen(true);
+    setLinkInput('');
+    setLinkInputError('');
+  };
+
+  const closeLinkModal = () => {
+    setIsLinkModalOpen(false);
+    setLinkInputError('');
+  };
+
+  const submitLinkAttachment = () => {
+    const url = linkInput.trim();
+    if (!url) {
+      setLinkInputError('*จำเป็น');
+      return;
+    }
+
+    if (!/^https?:\/\//i.test(url)) {
+      setLinkInputError('ลิงก์ต้องขึ้นต้นด้วย http:// หรือ https://');
+      return;
+    }
+
+    const entryByType: Record<AttachmentLinkType, { icon: string; label: string; success: string }> = {
+      drive: { icon: '☁️', label: 'Google Drive', success: 'แนบลิงก์ Google Drive แล้ว' },
+      youtube: { icon: '▶️', label: 'YouTube', success: 'แนบลิงก์ YouTube แล้ว' },
+      link: { icon: '🔗', label: 'ลิงก์แนบ', success: 'แนบลิงก์แล้ว' }
+    };
+
+    const selected = entryByType[linkModalType];
+    addDraftLine(`${selected.icon} [${selected.label}](${url})`);
+    setIsLinkModalOpen(false);
+    setLinkInput('');
+    setLinkInputError('');
+    showToast('success', selected.success);
+  };
+
+  const handleSelectFiles = () => {
+    announcementFileInputRef.current?.click();
+  };
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files: File[] = e.target.files ? Array.from(e.target.files as FileList) : [];
+    if (files.length === 0) return;
+
+    files.forEach((file) => {
+      addDraftLine(`📎 ไฟล์: ${file.name}`);
+    });
+
+    e.target.value = '';
+    showToast('success', `แนบไฟล์ ${files.length} รายการแล้ว`);
+  };
+
+  const deleteAnnouncement = async (announcementId: number) => {
+    if (currentUser.role !== 'teacher') {
+      showToast('error', 'เฉพาะครูเท่านั้นที่ลบประกาศได้');
+      return;
+    }
+
+    if (!window.confirm('ยืนยันลบประกาศนี้ใช่ไหม')) return;
+
+    try {
+      const res = await fetch(`/api/announcements/${announcementId}?actorId=${currentUser.id}`, {
+        method: 'DELETE'
+      });
+
+      if (!res.ok) {
+        const errorMessage = await getBackendErrorMessage(res, 'ไม่สามารถลบประกาศได้');
+        showToast('error', errorMessage);
+        return;
+      }
+
+      setAnnouncements((prev) => prev.filter((item) => item.id !== announcementId));
+      showToast('success', 'ลบประกาศแล้ว');
+    } catch (error) {
+      console.error('Failed to delete announcement', error);
+      showToast('error', 'เกิดข้อผิดพลาดระหว่างลบประกาศ');
     }
   };
 
@@ -2471,6 +2997,17 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
   useEffect(() => {
     if (currentUser.role !== 'student') return;
     if (tab !== 'classwork') return;
+
+    const intervalId = window.setInterval(() => {
+      fetchActiveGame();
+    }, 5000);
+
+    return () => window.clearInterval(intervalId);
+  }, [classroom.id, currentUser.id, currentUser.role, tab]);
+
+  useEffect(() => {
+    if (currentUser.role !== 'student') return;
+    if (tab !== 'classwork') return;
     if (!activeGamePayload.game || activeGamePayload.questions.length === 0) return;
     if (isSubmittingAnswer) return;
     if (timeLeft <= 0) return;
@@ -2595,39 +3132,317 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
         {tab === 'stream' && currentUser.role === 'teacher' && (
           <>
             <div className="lg:col-span-2 space-y-6">
-              <div className="bg-white/40 backdrop-blur-md rounded-2xl border border-slate-200/50 p-6 shadow-sm">
-                <form onSubmit={postAnnouncement} className="space-y-4">
-                  <div className="flex gap-4">
-                    <div className="w-10 h-10 rounded-full bg-pink-500/10 flex items-center justify-center shrink-0">
-                      <UserIcon className="w-5 h-5 text-pink-500" />
-                    </div>
-                    <textarea 
-                      name="content"
-                      placeholder="ประกาศบางอย่างในชั้นเรียนของคุณ..."
-                      className="w-full bg-white/60 border border-slate-200 rounded-xl p-4 text-sm focus:ring-2 focus:ring-pink-500 outline-none min-h-[100px] text-slate-900 placeholder:text-slate-400"
-                    />
-                  </div>
-                  <div className="flex justify-end">
-                    <button type="submit" className="bg-pink-600 text-white px-6 py-2 rounded-xl font-semibold hover:bg-pink-500 transition-all shadow-md shadow-pink-100">
-                      โพสต์
+              <div className="mx-auto w-full rounded-3xl border-2 border-[#CAB5DD] bg-[#FEFCFB] p-6 shadow-[0_12px_26px_rgba(75,46,114,0.15)] text-[#2D2D2D]">
+                <h2 className="mb-5 text-2xl font-extrabold tracking-tight">📢 สร้างประกาศ / สั่งงาน</h2>
+
+                <form onSubmit={postAnnouncement} className="space-y-5">
+                  <div className="mb-1 flex flex-wrap gap-3">
+                    <select
+                      value={classroom.id}
+                      onClick={() => showToast('success', `กำลังโพสต์ในห้อง ${classroom.name}`)}
+                      onChange={() => showToast('success', `กำลังโพสต์ในห้อง ${classroom.name}`)}
+                      className="cursor-pointer appearance-none rounded-full border-2 border-[#CAB5DD] bg-[#F1E9F6] px-5 py-2 font-bold text-[#9678B6] outline-none transition-colors hover:bg-[#E5D4F1] focus:ring-2 focus:ring-[#9678B6] disabled:opacity-100"
+                    >
+                      <option value={classroom.id}>{classroom.name}</option>
+                    </select>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        addDraftLine('👥 ถึง: นักเรียนทั้งหมด');
+                        showToast('success', 'เพิ่มผู้รับเป็นนักเรียนทั้งหมดแล้ว');
+                      }}
+                      className="flex items-center gap-2 rounded-full border-2 border-[#CAB5DD]/40 bg-white px-5 py-2 font-bold text-[#555] transition-colors hover:bg-[#F1E9F6]"
+                    >
+                      <Users className="h-5 w-5 text-[#9678B6]" />
+                      นักเรียนทั้งหมด
                     </button>
+                  </div>
+
+                  <div className="overflow-hidden rounded-2xl border-2 border-[#CAB5DD] bg-white transition-all focus-within:border-[#9678B6] focus-within:ring-4 focus-within:ring-[#F1E9F6]">
+                    <textarea
+                      name="content"
+                      value={announcementDraft}
+                      onChange={(e) => setAnnouncementDraft(e.target.value)}
+                      className="min-h-[160px] w-full resize-none bg-transparent p-5 text-[15px] font-medium text-[#2D2D2D] placeholder-[#A0A0A0] outline-none"
+                      placeholder="พิมพ์ประกาศ หรือสั่งงานที่นี่เลยจารย์! ✨..."
+                    />
+
+                    <div className="flex flex-wrap items-center justify-end border-t-2 border-[#CAB5DD]/30 bg-[#FDFDFD] px-4 py-3 sm:bg-[#F9F6FC]">
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={handleDriveAttachment}
+                          className="flex h-10 w-10 items-center justify-center rounded-full border border-[#CAB5DD]/30 bg-white text-lg shadow-sm transition-transform hover:scale-110 hover:bg-[#F8E3E6]"
+                          title="Google Drive"
+                        >
+                          ☁️
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleYoutubeAttachment}
+                          className="flex h-10 w-10 items-center justify-center rounded-full border border-[#CAB5DD]/30 bg-white text-lg shadow-sm transition-transform hover:scale-110 hover:bg-[#F8E3E6]"
+                          title="YouTube"
+                        >
+                          ▶️
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleSelectFiles}
+                          className="flex h-10 w-10 items-center justify-center rounded-full border border-[#CAB5DD]/30 bg-white text-lg shadow-sm transition-transform hover:scale-110 hover:bg-[#F8E3E6]"
+                          title="Upload File"
+                        >
+                          ⬆️
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleLinkAttachment}
+                          className="flex h-10 w-10 items-center justify-center rounded-full border border-[#CAB5DD]/30 bg-white text-lg shadow-sm transition-transform hover:scale-110 hover:bg-[#F8E3E6]"
+                          title="Link"
+                        >
+                          🔗
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <input
+                    ref={announcementFileInputRef}
+                    type="file"
+                    className="hidden"
+                    multiple
+                    onChange={handleFileInputChange}
+                  />
+
+                  <div className="mt-1 flex items-center justify-end gap-5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAnnouncementDraft('');
+                        setIsPostMenuOpen(false);
+                      }}
+                      className="font-bold text-[#888] transition-colors hover:text-[#2D2D2D]"
+                    >
+                      ยกเลิก
+                    </button>
+
+                    <div ref={postMenuRef} className="relative">
+                      <div className="flex overflow-hidden rounded-full border-2 border-[#CAB5DD] shadow-sm transition-transform hover:scale-[1.03]">
+                        <button
+                          type="submit"
+                          className="bg-[#D9F1DF] px-6 py-2.5 font-extrabold text-[#2D2D2D] hover:bg-[#c2ebd0] disabled:opacity-60"
+                          disabled={!announcementDraft.trim()}
+                        >
+                          โพสต์เลย! 🚀
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setIsPostMenuOpen((prev) => !prev)}
+                          className="border-l-2 border-[#CAB5DD] bg-[#D9F1DF] px-3 py-2.5 hover:bg-[#c2ebd0]"
+                        >
+                          ▼
+                        </button>
+                      </div>
+
+                      {isPostMenuOpen && (
+                        <div className="absolute right-0 top-[calc(100%+10px)] z-20 min-w-[180px] overflow-hidden rounded-2xl border border-[#CAB5DD]/40 bg-white shadow-[0_12px_24px_rgba(75,46,114,0.16)]">
+                          <button
+                            type="button"
+                            onClick={() => submitAnnouncement()}
+                            className="block w-full px-4 py-2.5 text-left text-sm font-semibold text-[#444] transition-colors hover:bg-[#F8E3E6]"
+                          >
+                            โพสต์ตอนนี้
+                          </button>
+                          <button
+                            type="button"
+                            onClick={openScheduleModal}
+                            className="block w-full border-t border-[#CAB5DD]/20 px-4 py-2.5 text-left text-sm font-semibold text-[#444] transition-colors hover:bg-[#F1E9F6]"
+                          >
+                            ตั้งเวลาโพสต์
+                          </button>
+                          <button
+                            type="button"
+                            onClick={saveAnnouncementDraft}
+                            className="block w-full border-t border-[#CAB5DD]/20 px-4 py-2.5 text-left text-sm font-semibold text-[#444] transition-colors hover:bg-[#F1E9F6]"
+                          >
+                            บันทึกร่าง
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </form>
               </div>
 
+              <AnimatePresence>
+                {isLinkModalOpen && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4"
+                    onClick={closeLinkModal}
+                  >
+                    <motion.div
+                      initial={{ opacity: 0, y: 10, scale: 0.98 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: 6, scale: 0.98 }}
+                      transition={{ duration: 0.18 }}
+                      className="w-full max-w-[430px] rounded-xl bg-white p-6 shadow-[0_12px_26px_rgba(75,46,114,0.2)]"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <h3 className="mb-5 text-[30px] font-bold text-[#444]">
+                        {linkModalType === 'drive' ? 'เพิ่มลิงก์ Google Drive' : linkModalType === 'youtube' ? 'เพิ่มลิงก์ YouTube' : 'เพิ่มลิงก์'}
+                      </h3>
+
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          submitLinkAttachment();
+                        }}
+                        className="space-y-4"
+                      >
+                        <div>
+                          <label htmlFor="announcement-link-input" className="mb-1 block text-lg font-semibold text-[#B33A3A]">
+                            ลิงก์*
+                          </label>
+                          <input
+                            id="announcement-link-input"
+                            value={linkInput}
+                            onChange={(e) => {
+                              setLinkInput(e.target.value);
+                              if (linkInputError) setLinkInputError('');
+                            }}
+                            autoFocus
+                            className={`h-14 w-full rounded-t-md border-b-2 bg-slate-200/80 px-3 text-[18px] outline-none ${
+                              linkInputError ? 'border-b-red-600' : 'border-b-[#CAB5DD]'
+                            }`}
+                            placeholder=""
+                          />
+                          {linkInputError && <p className="mt-1 text-sm font-semibold text-[#B33A3A]">{linkInputError}</p>}
+                        </div>
+
+                        <div className="flex items-center justify-end gap-6 pt-3">
+                          <button
+                            type="button"
+                            onClick={closeLinkModal}
+                            className="text-xl font-bold text-blue-600 transition-colors hover:text-blue-700"
+                          >
+                            ยกเลิก
+                          </button>
+                          <button
+                            type="submit"
+                            className="text-xl font-bold text-blue-600 transition-colors hover:text-blue-700 disabled:text-slate-400"
+                            disabled={!linkInput.trim()}
+                          >
+                            เพิ่มลิงก์
+                          </button>
+                        </div>
+                      </form>
+                    </motion.div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <AnimatePresence>
+                {isScheduleModalOpen && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4"
+                    onClick={closeScheduleModal}
+                  >
+                    <motion.div
+                      initial={{ opacity: 0, y: 10, scale: 0.98 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: 6, scale: 0.98 }}
+                      transition={{ duration: 0.18 }}
+                      className="w-full max-w-[430px] rounded-xl bg-white p-6 shadow-[0_12px_26px_rgba(75,46,114,0.2)]"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <h3 className="mb-5 text-[30px] font-bold text-[#444]">ตั้งเวลาโพสต์</h3>
+
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          submitScheduledAnnouncement();
+                        }}
+                        className="space-y-4"
+                      >
+                        <div>
+                          <label htmlFor="announcement-schedule-input" className="mb-1 block text-lg font-semibold text-[#444]">
+                            วันและเวลาโพสต์*
+                          </label>
+                          <input
+                            id="announcement-schedule-input"
+                            type="datetime-local"
+                            value={scheduleDateTimeInput}
+                            onChange={(e) => {
+                              setScheduleDateTimeInput(e.target.value);
+                              if (scheduleDateTimeError) setScheduleDateTimeError('');
+                            }}
+                            autoFocus
+                            className={`h-14 w-full rounded-md border-2 bg-slate-100/80 px-3 text-[18px] outline-none ${
+                              scheduleDateTimeError ? 'border-red-500' : 'border-[#CAB5DD]'
+                            }`}
+                          />
+                          {scheduleDateTimeError && <p className="mt-1 text-sm font-semibold text-[#B33A3A]">{scheduleDateTimeError}</p>}
+                        </div>
+
+                        <div className="flex items-center justify-end gap-6 pt-3">
+                          <button
+                            type="button"
+                            onClick={closeScheduleModal}
+                            className="text-xl font-bold text-blue-600 transition-colors hover:text-blue-700"
+                          >
+                            ยกเลิก
+                          </button>
+                          <button
+                            type="submit"
+                            className="text-xl font-bold text-blue-600 transition-colors hover:text-blue-700"
+                          >
+                            ตั้งเวลาโพสต์
+                          </button>
+                        </div>
+                      </form>
+                    </motion.div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
               <div className="space-y-4">
                 {announcements.map((ann) => (
                   <div key={ann.id} className="bg-white/40 backdrop-blur-md rounded-2xl border border-slate-200/50 p-6 shadow-sm">
-                    <div className="flex items-center gap-3 mb-4">
+                    <div className="mb-4 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
                       <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center">
                         <UserIcon className="w-5 h-5 text-slate-400" />
                       </div>
                       <div>
                         <p className="font-bold text-sm text-slate-900">ครู</p>
-                        <p className="text-xs text-slate-400">{new Date(ann.created_at).toLocaleDateString()}</p>
+                        <p className="text-xs text-slate-400">{new Date(ann.created_at).toLocaleString()}</p>
+                        {ann.publish_at && new Date(ann.publish_at.replace(' ', 'T')).getTime() > Date.now() && (
+                          <p className="text-xs font-semibold text-amber-600">
+                            ตั้งเวลาโพสต์: {new Date(ann.publish_at.replace(' ', 'T')).toLocaleString()}
+                          </p>
+                        )}
                       </div>
-                    </div>
-                    <p className="text-slate-600 whitespace-pre-wrap">{ann.content}</p>
+                      </div>
+                      {currentUser.role === 'teacher' && (
+                        <button
+                          type="button"
+                          onClick={() => deleteAnnouncement(ann.id)}
+                          className="rounded-xl border border-rose-200 bg-white px-3 py-1.5 text-xs font-bold text-rose-600 transition-colors hover:bg-rose-50"
+                        >
+                          ลบโพสต์
+                        </button>
+                      )}
+                      </div>
+                    <div
+                      className="text-slate-600 break-words"
+                      dangerouslySetInnerHTML={{ __html: formatAnnouncementHtml(ann.content) }}
+                    />
                   </div>
                 ))}
               </div>
@@ -2764,7 +3579,10 @@ const ClassView: React.FC<{ classroom: Classroom, currentUser: User, users: User
                       ) : (
                         announcements.map((ann) => (
                           <div key={ann.id} className="bg-white/70 rounded-xl border border-slate-100 p-4">
-                            <p className="text-sm text-slate-700 whitespace-pre-wrap">{ann.content}</p>
+                            <div
+                              className="text-sm text-slate-700 break-words"
+                              dangerouslySetInnerHTML={{ __html: formatAnnouncementHtml(ann.content) }}
+                            />
                             <p className="text-xs text-slate-400 mt-2">{new Date(ann.created_at).toLocaleDateString()}</p>
                           </div>
                         ))

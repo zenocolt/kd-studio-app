@@ -33,6 +33,7 @@ export interface Announcement {
   id: number;
   class_id: number;
   content: string;
+  publish_at?: string | null;
   created_at: string;
 }
 
